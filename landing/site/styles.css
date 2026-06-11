@@ -1,0 +1,103 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  background: #0b1220;
+  color: #e7eaf0;
+}
+a { color: inherit; }
+
+.wrap { max-width: 920px; margin: 0 auto; padding: 28px 18px; }
+.hero { margin-bottom: 18px; }
+.hero h1 { margin: 0 0 8px; font-size: 38px; letter-spacing: 0.3px; }
+.hero p { margin: 0; opacity: 0.8; line-height: 1.4; }
+
+.card {
+  background: #121a2a;
+  border: 1px solid #22304a;
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 14px;
+}
+
+.h2 { margin: 0 0 12px; font-size: 18px; }
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+label { display: block; font-size: 13px; opacity: 0.95; }
+input, select {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 11px;
+  border-radius: 10px;
+  border: 1px solid #2a3a58;
+  background: #0f1727;
+  color: #e7eaf0;
+  outline: none;
+}
+input:focus, select:focus { border-color: #4b70ff; }
+
+.check { display: flex; gap: 10px; align-items: center; margin: 12px 0 8px; }
+.check input { width: auto; margin: 0; }
+
+.disclosure { margin: 0 0 12px; font-size: 12px; opacity: 0.75; line-height: 1.35; }
+
+button {
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: 10px;
+  border: 1px solid #2a3a58;
+  background: #1b2a48;
+  color: #e7eaf0;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.status { margin-top: 10px; min-height: 18px; font-size: 13px; opacity: 0.95; }
+.status.ok { color: #7ee7a3; }
+.status.bad { color: #ff8a8a; }
+
+.foot { margin-top: 14px; opacity: 0.75; font-size: 12px; display: flex; gap: 8px; align-items: center; }
+
+.hidden { display: none; }
+
+.result {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #22304a;
+  background: #0f1727;
+  line-height: 1.35;
+}
+
+.actions { margin-top: 12px; display: flex; gap: 10px; }
+.actions button { width: auto; flex: 1; }
+
+.small { opacity: 0.8; font-size: 13px; margin-bottom: 10px; }
+
+.slots {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.slot {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #2a3a58;
+  background: #0f1727;
+  color: #e7eaf0;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  .row { grid-template-columns: 1fr; }
+  .slots { grid-template-columns: 1fr; }
+}

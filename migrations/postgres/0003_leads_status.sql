@@ -1,0 +1,14 @@
+ALTER TABLE leads
+  ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'raw';
+
+ALTER TABLE leads
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+ALTER TABLE leads
+  ADD COLUMN IF NOT EXISTS score INTEGER;
+
+ALTER TABLE leads
+  ADD COLUMN IF NOT EXISTS routed_to TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+CREATE INDEX IF NOT EXISTS idx_leads_updated_at ON leads(updated_at);

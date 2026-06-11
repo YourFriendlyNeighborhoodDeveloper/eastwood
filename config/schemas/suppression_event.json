@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SuppressionEvent",
+  "type": "object",
+  "required": ["event_id", "ts", "kind", "value"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "ts": { "type": "string" },
+    "kind": { "type": "string" },
+    "value": { "type": "string" },
+    "meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}

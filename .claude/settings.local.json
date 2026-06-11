@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /Users/lsdgummibear/Desktop/Eastwood/scripts/init-multiple-postgres-dbs.sh)",
+      "Bash(docker compose *)",
+      "Bash(curl -s http://localhost:18080/health)",
+      "Bash(curl -s http://localhost:18081/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:18000/)"
+    ]
+  }
+}

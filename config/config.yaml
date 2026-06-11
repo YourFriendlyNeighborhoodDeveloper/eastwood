@@ -1,0 +1,116 @@
+app:
+  name: eastwood
+  env: dev
+
+api:
+  host: 0.0.0.0
+  port: 8001
+
+metrics:
+  host: 0.0.0.0
+  port: 8000
+
+kafka:
+  bootstrap_servers: kafka:9092
+  client_id: eastwood
+  security_protocol: PLAINTEXT
+
+topics:
+  leads_raw: leads.raw
+  leads_normalized: leads.normalized
+  leads_validated: leads.validated
+  leads_enriched: leads.enriched
+  leads_scored: leads.scored
+  leads_routed: leads.routed
+  consent_events: consent.events
+  touches_events: touches.events
+  suppression_events: suppression.events
+  dlq_events: dlq.events
+
+redis:
+  host: redis
+  port: 6379
+  db: 0
+
+postgres:
+  host: postgres
+  port: 5432
+  db: eastwood
+  user: eastwood
+  password: eastwood
+  sslmode: disable
+
+neo4j:
+  enabled: false
+  uri: bolt://neo4j:7687
+  user: neo4j
+  password: password
+
+policy:
+  recency_days: 30
+  allowed_products:
+    - final_expense
+    - iul
+    - annuity
+
+  required_lead_fields:
+    - product
+    - phone
+
+  consent:
+    required: true
+    required_fields:
+      - ts
+      - form_url
+      - disclosure
+      - ip
+      - user_agent
+
+  dedupe:
+    window_days: 30
+
+booking:
+  api_base_url: "http://localhost:8001"
+  public_base_url: "http://localhost:8001"
+  token_ttl_hours: 72
+  work_hours:
+    tz: "America/Detroit"
+    days: [1, 2, 3, 4, 5]
+    start: "10:00"
+    end: "18:00"
+    slot_minutes: 20
+    buffer_minutes: 10
+
+sms:
+  provider: twilio
+  twilio:
+    account_sid: ""
+    auth_token: ""
+    from_number: ""
+  agent_notify_number: ""
+
+carriers:
+  final_expense:
+    MI:
+      preferred: [liberty_bankers, royal_neighbors, americo]
+      fallback: [gtl, mutual_of_omaha]
+  iul:
+    MI:
+      preferred: [corebridge, transamerica, foresters]
+      fallback: [mutual_of_omaha]
+  annuity:
+    MI:
+      preferred: [corebridge, americo]
+      fallback: [transamerica]
+
+vendors:
+  enabled: []
+  everquote:
+    enabled: false
+    api_key: ""
+  quotewizard:
+    enabled: false
+    api_key: ""
+  mediaalpha:
+    enabled: false
+    api_key: ""

@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TouchEvent",
+  "type": "object",
+  "required": ["event_id", "ts", "lead_id", "channel", "result"],
+  "properties": {
+    "event_id": { "type": "string" },
+    "ts": { "type": "string" },
+    "lead_id": { "type": "string" },
+    "channel": { "type": "string" },
+    "result": { "type": "string" },
+    "meta": { "type": "object" }
+  },
+  "additionalProperties": false
+}

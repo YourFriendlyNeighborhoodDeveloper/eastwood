@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Eastwood Risk Scan</title>
+  <link rel="stylesheet" href="/styles.css?v=2" />
+  <script defer src="/app.js?v=2"></script>
+</head>
+<body>
+  <main class="wrap">
+    <header class="hero">
+      <h1>Eastwood Risk Scan</h1>
+      <p>60 seconds. You get a plan + booking link.</p>
+    </header>
+
+    <section class="card" id="step1">
+      <h2 class="h2">Step 1: Quick Inputs</h2>
+      <form id="riskForm">
+        <div class="row">
+          <label>
+            Product
+            <select name="product" required>
+              <option value="iul">IUL</option>
+              <option value="final_expense">Final Expense</option>
+              <option value="annuity">Annuity</option>
+            </select>
+          </label>
+
+          <label>
+            Age
+            <input name="age" type="number" min="18" max="90" required />
+          </label>
+
+          <label>
+            Smoker
+            <select name="smoker" required>
+              <option value="no">No</option>
+              <option value="yes">Yes</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="row">
+          <label>
+            Coverage Target ($)
+            <input name="coverage_target" type="number" min="5000" step="1000" required />
+          </label>
+
+          <label>
+            Timeline
+            <select name="timeline" required>
+              <option value="today">Today</option>
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+            </select>
+          </label>
+
+          <label>
+            State
+            <input name="state" value="MI" maxlength="2" required />
+          </label>
+        </div>
+
+        <div class="row">
+          <label>
+            ZIP
+            <input name="zip" value="48734" required />
+          </label>
+
+          <label>
+            Phone
+            <input name="phone" placeholder="989-555-0123" required />
+          </label>
+
+          <label>
+            Email (optional)
+            <input name="email" type="email" placeholder="you@example.com" />
+          </label>
+        </div>
+
+        <label class="check">
+          <input id="consent" type="checkbox" required />
+          I agree to be contacted by phone/text/email about insurance options.
+        </label>
+
+        <p id="disclosure" class="disclosure">
+          By submitting you agree to be contacted about insurance products. Message/data rates may apply. Consent is not a condition of purchase. Reply STOP to opt out.
+        </p>
+
+        <button id="calcBtn" type="button">Show My Score</button>
+        <button id="submitBtn" type="submit">Get My Plan + Book</button>
+        <div id="status" class="status"></div>
+      </form>
+    </section>
+
+    <section class="card hidden" id="step2">
+      <h2 class="h2">Step 2: Your Result</h2>
+      <div id="resultBox" class="result"></div>
+      <div class="actions">
+        <button id="goBookBtn" type="button">Book a Time</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="step3">
+      <h2 class="h2">Step 3: Book</h2>
+      <div class="small">Pick a slot. Confirmation is sent by SMS.</div>
+      <div id="slots" class="slots"></div>
+      <div id="bookStatus" class="status"></div>
+    </section>
+
+    <footer class="foot">
+      <span>API:</span> <a href="/api/health" target="_blank" rel="noreferrer">/api/health</a>
+    </footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,90 @@
+{
+  "ruleset_version": "0.1",
+  "effective_date": "2026-06-01",
+  "max_issue_age": 85,
+  "min_issue_age": 18,
+  "thresholds": {
+    "T1_call_now_ceiling": 0.35,
+    "T2_workable_ceiling": 0.85
+  },
+  "comorbidity_bump_per_extra_condition": 0.10,
+  "comorbidity_bump_cap": 0.20,
+  "hard_universal_decline": [
+    "nursing_home_resident",
+    "hospice_terminal",
+    "currently_hospitalized",
+    "dementia_alzheimers",
+    "als",
+    "huntingtons"
+  ],
+  "gi_floor_conditions": [
+    "cancer_stage4",
+    "esrd_dialysis",
+    "organ_transplant",
+    "active_aids",
+    "chronic_oxygen"
+  ],
+  "conditions": [
+    { "code": "hypertension_controlled",    "base_severity": 0.05, "lookback_years": null },
+    { "code": "cholesterol_high_controlled","base_severity": 0.05, "lookback_years": null },
+    { "code": "arthritis",                  "base_severity": 0.05, "lookback_years": null },
+    { "code": "thyroid_stable",             "base_severity": 0.05, "lookback_years": null },
+    { "code": "diabetes_oral_controlled",   "base_severity": 0.20, "lookback_years": null },
+    { "code": "copd_mild",                  "base_severity": 0.45, "lookback_years": null },
+    { "code": "diabetes_insulin",           "base_severity": 0.55, "lookback_years": null },
+    { "code": "heart_attack",               "base_severity": 0.60, "lookback_years": 2    },
+    { "code": "stroke_tia",                 "base_severity": 0.60, "lookback_years": 2    },
+    { "code": "cancer_remission",           "base_severity": 0.55, "lookback_years": 2    },
+    { "code": "chf",                        "base_severity": 0.75, "lookback_years": null },
+    { "code": "copd_severe",                "base_severity": 0.80, "lookback_years": null },
+    { "code": "oxygen",                     "base_severity": 0.80, "lookback_years": null },
+    { "code": "diabetes_with_complication", "base_severity": 0.80, "lookback_years": null }
+  ],
+  "med_proxies": [
+    { "code": "insulin",         "implies": "diabetes_insulin",    "severity": 0.55 },
+    { "code": "warfarin",        "implies": "cardiac_clotting",    "severity": 0.50 },
+    { "code": "coumadin",        "implies": "cardiac_clotting",    "severity": 0.50 },
+    { "code": "eliquis",         "implies": "cardiac_clotting",    "severity": 0.50 },
+    { "code": "plavix",          "implies": "cardiac_clotting",    "severity": 0.50 },
+    { "code": "furosemide_high", "implies": "chf",                 "severity": 0.70 },
+    { "code": "oxygen_therapy",  "implies": "copd_severe",         "severity": 0.55 },
+    { "code": "spiriva",         "implies": "copd_severe",         "severity": 0.55 },
+    { "code": "advair",          "implies": "copd_severe",         "severity": 0.55 },
+    { "code": "donepezil",       "implies": "dementia_alzheimers", "severity": null, "escalate_to_l1": true },
+    { "code": "memantine",       "implies": "dementia_alzheimers", "severity": null, "escalate_to_l1": true },
+    { "code": "oncology_agent",  "implies": "cancer_active",       "severity": 0.70 }
+  ],
+  "modifiers": {
+    "tobacco_current": 0.10,
+    "tobacco_former":  0.03,
+    "tobacco_unknown": 0.05,
+    "bmi_obese_1":     0.05,
+    "bmi_obese_2":     0.10,
+    "bmi_obese_3":     0.15,
+    "age_75_80":       0.05,
+    "age_81_plus":     0.10
+  },
+  "priority_weights": {
+    "w_cleanliness": 0.30,
+    "w_freshness":   0.30,
+    "w_intent":      0.15,
+    "w_attempts":    0.10,
+    "w_replacement": 0.15
+  },
+  "attempt_penalty_per_try": 0.12,
+  "attempt_penalty_cap":     0.90,
+  "lookback_outside_window_factor": 0.35,
+  "lookback_unknown_date_factor":   1.0,
+  "source_intent": {
+    "fb_lead_ad":       1.0,
+    "facebook_leadgen": 1.0,
+    "orphan":           0.80,
+    "integrity_import": 0.65,
+    "csv_import":       0.60,
+    "aged_list":        0.40,
+    "default":          0.50
+  },
+  "freshness_halflife_days": 30,
+  "confidence_critical_fields": ["age", "state", "tobacco_known", "health_data_present", "on_dnc"],
+  "contestability_window_years": 2
+}

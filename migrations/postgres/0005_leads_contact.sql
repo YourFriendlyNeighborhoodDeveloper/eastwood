@@ -1,0 +1,4 @@
+ALTER TABLE leads
+  ADD COLUMN IF NOT EXISTS phone_e164 TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_leads_phone_e164 ON leads(phone_e164);

@@ -1,0 +1,82 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("AGENT_DATABASE_URL")
+}
+
+enum CallChannel {
+  OUTBOUND_AUTO
+  OUTBOUND_MANUAL
+  INBOUND
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  FAILED
+  TRANSFERRED
+}
+
+enum TurnRole {
+  USER
+  ASSISTANT
+  TOOL
+}
+
+model CallSession {
+  id           String        @id @default(uuid())
+  leadId       String
+  tenantId     String
+  channel      CallChannel   @default(OUTBOUND_AUTO)
+  status       SessionStatus @default(ACTIVE)
+  phoneE164    String
+  productLine  String?
+  machineState String        @default("greeting")
+  context      Json          @default("{}")
+  startedAt    DateTime      @default(now())
+  endedAt      DateTime?
+  durationSec  Int?
+  outcome      String?
+
+  turns       ConversationTurn[]
+  toolCalls   ToolInvocation[]
+
+  @@index([leadId])
+  @@index([tenantId])
+  @@map("call_sessions")
+}
+
+model ConversationTurn {
+  id         String   @id @default(uuid())
+  sessionId  String
+  role       TurnRole
+  content    String
+  tokenCount Int?
+  latencyMs  Int?
+  createdAt  DateTime @default(now())
+
+  session CallSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@map("conversation_turns")
+}
+
+model ToolInvocation {
+  id         String   @id @default(uuid())
+  sessionId  String
+  toolName   String
+  input      Json
+  output     Json?
+  errorMsg   String?
+  latencyMs  Int?
+  policyVeto Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  session CallSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@map("tool_invocations")
+}
