@@ -66,6 +66,9 @@ export type Objection = z.infer<typeof ObjectionSchema>;
  */
 export interface SessionState {
   quote: Quote | null;
+  appointmentBooked: boolean;
+  /** Set once call_ended has been published, so endSession does not emit a second. */
+  callEndedPublished: boolean;
 }
 
 export const AgentEventSchema = z.discriminatedUnion("eventType", [

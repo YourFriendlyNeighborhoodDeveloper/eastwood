@@ -99,7 +99,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
-  book_appointment: async (input, { lead, sessionId, actor }) => {
+  book_appointment: async (input, { lead, sessionId, actor, session }) => {
     const parsed = z
       .object({
         preferredDate: z.string(),
@@ -140,6 +140,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    session.appointmentBooked = true;
     actor.send({ type: "WRAP_UP" });
     toolInvocations.inc({ tool_name: "book_appointment", outcome: "success" });
 
@@ -298,7 +299,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     return { transferred: true, reason: parsed.reason };
   },
 
-  end_call: async (input, { lead, sessionId, bridge, actor }) => {
+  end_call: async (input, { lead, sessionId, bridge, actor, session }) => {
     const parsed = z
       .object({ outcome: z.string().optional(), notes: z.string().optional() })
       .parse(input);
@@ -309,6 +310,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
       sessionId,
       outcome: parsed.outcome,
     });
+    // Suppress the hangup-path call_ended that endSession would otherwise emit
+    // when the telephony stream closes a moment later.
+    session.callEndedPublished = true;
 
     actor.send({ type: "END" });
     toolInvocations.inc({ tool_name: "end_call", outcome: "success" });

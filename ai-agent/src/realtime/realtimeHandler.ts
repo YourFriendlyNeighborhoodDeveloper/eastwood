@@ -27,6 +27,8 @@ interface ActiveSession {
   actor: Actor<typeof salesMachine>;
   /** Set by the get_quote tool. Drives which closing tools are exposed. */
   quote: Quote | null;
+  appointmentBooked: boolean;
+  callEndedPublished: boolean;
   openaiWs: WebSocket | null;
   telephonyWs: WebSocket | null;
   streamSid: string | null;
@@ -65,6 +67,8 @@ export class RealtimeHandler {
       lead,
       actor,
       quote: null,
+      appointmentBooked: false,
+      callEndedPublished: false,
       openaiWs: null,
       telephonyWs: null,
       streamSid: null,
@@ -262,9 +266,37 @@ export class RealtimeHandler {
     session.openaiWs?.send(JSON.stringify({ type: "response.create" }));
   }
 
+  /**
+   * Outcome for a call that ended without the model calling end_call — the
+   * prospect hung up, or Twilio dropped the stream. brain.py maps this onto a
+   * follow-up sequence, so it must name what actually happened.
+   */
+  private hangupOutcome(session: ActiveSession): string {
+    if (session.appointmentBooked) return "appointment_set";
+    if (session.quote) return "quoted_not_closed";
+    return "hangup";
+  }
+
   async endSession(sessionId: string, reason?: string): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
+
+    // Non-tool endings must still produce an outcome, otherwise the call leaves
+    // no record and no follow-up or retry is ever scheduled.
+    if (!session.callEndedPublished) {
+      session.callEndedPublished = true;
+      try {
+        await this.bridge.publishEvent({
+          eventType: "call_ended",
+          leadId: session.lead.leadId,
+          sessionId,
+          outcome: this.hangupOutcome(session),
+          durationSeconds: Math.round((Date.now() - session.startedAt) / 1000),
+        });
+      } catch (err) {
+        logger.error({ err, sessionId }, "failed to publish call_ended on session end");
+      }
+    }
 
     session.openaiWs?.close();
     session.telephonyWs?.close();

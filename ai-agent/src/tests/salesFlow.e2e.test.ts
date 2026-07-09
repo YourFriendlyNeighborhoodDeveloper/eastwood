@@ -93,6 +93,20 @@ class FakeBridge {
   }
 }
 
+/** Stands in for the Twilio media-stream socket. Closing it is a prospect hangup. */
+class FakeTelephonySocket extends EventEmitter {
+  readyState = 1;
+  send(): void {}
+  close(): void {
+    this.readyState = 3;
+  }
+  /** The prospect hangs up: Twilio closes the media stream. */
+  hangUp(): void {
+    this.readyState = 3;
+    this.emit("close");
+  }
+}
+
 const CANCER_FOLLOWUPS: AcquisitionTask[] = [
   { field: "followup_cancer_type", priority: 10, question: "What type of cancer was it?", captureKey: "cancer_type" },
   { field: "followup_treatment_end_date", priority: 11, question: "When did treatment end?", captureKey: "treatment_end_date" },
@@ -201,6 +215,7 @@ async function callTool(socket: FakeOpenAiSocket, name: string, args: Record<str
 
 async function startCall(): Promise<{
   socket: FakeOpenAiSocket;
+  tele: FakeTelephonySocket;
   bridge: FakeBridge;
   handler: InstanceType<RealtimeHandlerCtor>;
   sessionId: string;
@@ -216,7 +231,11 @@ async function startCall(): Promise<{
   socket.emit("open"); // triggers the first session.update
   await waitFor(() => socket.sessionUpdates().length > 0, "initial session.update");
 
-  return { socket, bridge, handler, sessionId, lead };
+  // Twilio connects the media stream once the prospect picks up.
+  const tele = new FakeTelephonySocket();
+  handler.bindTelephony(sessionId, tele as any);
+
+  return { socket, tele, bridge, handler, sessionId, lead };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -342,6 +361,50 @@ describe("sales flow end-to-end", () => {
     const last = JSON.parse(results[results.length - 1]!["item"]["output"]);
     assert.equal(last.booked, false);
     assert.ok(last.error, "must surface an error the agent can speak");
+  });
+
+  it("emits call_ended when the prospect hangs up without the model calling end_call", async () => {
+    const { socket, tele, bridge, sessionId, handler } = await startCall();
+
+    for (const task of tier1Plan()) {
+      await callTool(socket, "update_lead_field", { field: task.field, captureKey: task.captureKey, value: "none" });
+    }
+    await callTool(socket, "get_quote", { productLine: "final_expense", age: 68, state: "MI", faceValue: 10_000, tobaccoUser: false });
+
+    assert.equal(bridge.count("call_ended"), 0, "no outcome yet — the call is live");
+
+    tele.hangUp(); // Twilio closes the media stream
+    await waitFor(() => bridge.count("call_ended") === 1, "call_ended after hangup");
+
+    const ended = bridge.find("call_ended")!;
+    // They heard a quote and left without booking: brain.py maps this to the
+    // quoted_not_closed follow-up sequence.
+    assert.equal(ended["outcome"], "quoted_not_closed");
+    assert.equal(ended["sessionId"], sessionId);
+    assert.equal(typeof ended["durationSeconds"], "number");
+    assert.equal(handler.getSession(sessionId), null, "session is torn down");
+  });
+
+  it("emits exactly one call_ended when end_call is followed by the stream closing", async () => {
+    const { socket, tele, bridge } = await startCall();
+
+    await callTool(socket, "end_call", { outcome: "not_interested" });
+    assert.equal(bridge.count("call_ended"), 1);
+
+    tele.hangUp(); // the stream always closes right after
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(bridge.count("call_ended"), 1, "endSession must not emit a duplicate outcome");
+    assert.equal(bridge.find("call_ended")!["outcome"], "not_interested", "the model's outcome wins");
+  });
+
+  it("reports a hangup before any quote as a plain hangup", async () => {
+    const { tele, bridge } = await startCall();
+
+    tele.hangUp();
+    await waitFor(() => bridge.count("call_ended") === 1, "call_ended after early hangup");
+
+    assert.equal(bridge.find("call_ended")!["outcome"], "hangup");
   });
 
   it("never gates the DNC escape hatch", async () => {
