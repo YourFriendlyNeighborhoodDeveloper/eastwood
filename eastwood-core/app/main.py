@@ -10,7 +10,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from api.routes import router
-from config.settings import get_settings
+from config.settings import assert_production_safety, get_settings
 from kafka_io.kafka_client import KafkaConsumer, stop_producer
 from workers.brain import WorkersBrain
 
@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+
+    # Fail before touching the database, Kafka, or the dialer.
+    assert_production_safety(settings)
 
     # Ensure all ORM tables exist (idempotent — safe to run every startup)
     from sqlalchemy import text

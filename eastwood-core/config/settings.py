@@ -43,7 +43,17 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openfec_api_key: str = ""
 
+    # Deployment environment. "production" enables the compliance boot guard.
+    app_env: str = "development"
+
     enforce_tcpa: bool = True
+
+    # Skips the 8am-9pm local-time TCPA calling window. Local testing only —
+    # assert_production_safety() refuses to boot with this set in production.
+    # domain.tcpa reads the BYPASS_TCPA environment variable directly; this
+    # field exists so the guard can see the same value.
+    bypass_tcpa: bool = False
+
     score_hot_threshold: int = 75
     score_warm_threshold: int = 50
 
@@ -118,3 +128,23 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+class UnsafeProductionConfigError(RuntimeError):
+    """Raised at startup when a development-only escape hatch is set in production."""
+
+
+def assert_production_safety(settings: Settings | None = None) -> None:
+    """Refuse to boot a production deployment with compliance checks disabled.
+
+    BYPASS_TCPA short-circuits the 8am-9pm local-time calling window. Dialing
+    outside that window is a per-call TCPA violation, so production must never
+    start with it set.
+    """
+    s = settings or get_settings()
+    if s.app_env.strip().lower() == "production" and s.bypass_tcpa:
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with BYPASS_TCPA=true. "
+            "This disables the TCPA calling-window check for live outbound "
+            "dialing. Unset BYPASS_TCPA, or set APP_ENV to a non-production value."
+        )
