@@ -6,7 +6,6 @@ import { logger, toolInvocations } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
 import type { AcquisitionTask, LeadContext, ProductLine, SessionState } from "../types.js";
 import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
-import { randomUUID } from "crypto";
 
 const policy = new PolicyEngine();
 
@@ -100,7 +99,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
-  book_appointment: async (input, { lead, sessionId, bridge, actor }) => {
+  book_appointment: async (input, { lead, sessionId, actor }) => {
     const parsed = z
       .object({
         preferredDate: z.string(),
@@ -110,7 +109,12 @@ export const toolHandlers: Record<string, ToolHandler> = {
       .parse(input);
 
     const cfg = loadConfig();
-    let appointmentId: string = randomUUID();
+
+    // eastwood-core is the single source of truth: POST /api/appointments writes
+    // the row and publishes appointment_booked itself. The agent must NOT also
+    // publish that event — two publishers meant two confirmation SMS and a
+    // doubled dial-queue cancel.
+    let appointmentId: string;
     try {
       const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/appointments`, {
         method: "POST",
@@ -123,25 +127,18 @@ export const toolHandlers: Record<string, ToolHandler> = {
           notes: parsed.notes,
         }),
       });
-      if (resp.ok) {
-        const data = (await resp.json()) as Record<string, unknown>;
-        if (typeof data["appointment_id"] === "string") {
-          appointmentId = data["appointment_id"];
-        }
-      } else {
-        logger.warn({ status: resp.status }, "appointments API returned non-OK; falling back to Kafka-only");
-      }
+      if (!resp.ok) throw new Error(`appointments API ${resp.status}`);
+      const data = (await resp.json()) as Record<string, unknown>;
+      appointmentId = String(data["appointment_id"] ?? "");
     } catch (err) {
-      logger.error({ err }, "book_appointment HTTP call failed; falling back to Kafka-only");
+      // Never tell the prospect they are booked when nothing was written.
+      logger.error({ err, sessionId }, "book_appointment failed");
+      toolInvocations.inc({ tool_name: "book_appointment", outcome: "error" });
+      return {
+        booked: false,
+        error: "I couldn't lock that slot in just now — could we try another time?",
+      };
     }
-
-    // Always publish the event — brain.py sends the SMS confirmation
-    await bridge.publishEvent({
-      eventType: "appointment_booked",
-      leadId: lead.leadId,
-      sessionId,
-      slotId: appointmentId,
-    });
 
     actor.send({ type: "WRAP_UP" });
     toolInvocations.inc({ tool_name: "book_appointment", outcome: "success" });

@@ -23,7 +23,7 @@ process.env["EASTWOOD_CORE_BASE_URL"] ??= "http://eastwood-core:8080";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { after, before, describe, it } from "node:test";
+import { after, before, beforeEach, describe, it } from "node:test";
 
 import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 import type { AcquisitionTask, LeadContext } from "../types.js";
@@ -88,6 +88,9 @@ class FakeBridge {
   find(eventType: string): Record<string, any> | undefined {
     return this.events.find((e) => e["eventType"] === eventType);
   }
+  count(eventType: string): number {
+    return this.events.filter((e) => e["eventType"] === eventType).length;
+  }
 }
 
 const CANCER_FOLLOWUPS: AcquisitionTask[] = [
@@ -95,10 +98,31 @@ const CANCER_FOLLOWUPS: AcquisitionTask[] = [
   { field: "followup_treatment_end_date", priority: 11, question: "When did treatment end?", captureKey: "treatment_end_date" },
 ];
 
+interface FetchStub {
+  calls: string[];
+  /** Force POST /api/appointments to fail, simulating core being down. */
+  failAppointments: boolean;
+  countCalls(suffix: string): number;
+  reset(): void;
+  restore(): void;
+}
+
 /** Stubs the three eastwood-core endpoints the tools call. */
-function installFetchStub(): { calls: string[]; restore: () => void } {
+function installFetchStub(): FetchStub {
   const original = globalThis.fetch;
-  const calls: string[] = [];
+  const stub: FetchStub = {
+    calls: [],
+    failAppointments: false,
+    countCalls: (suffix) => stub.calls.filter((u) => u.endsWith(suffix)).length,
+    reset: () => {
+      stub.calls.length = 0;
+      stub.failAppointments = false;
+    },
+    restore: () => {
+      globalThis.fetch = original;
+    },
+  };
+  const calls = stub.calls;
 
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input);
@@ -124,12 +148,15 @@ function installFetchStub(): { calls: string[]; restore: () => void } {
       return ok({ condition: body.condition, questions: CANCER_FOLLOWUPS });
     }
     if (url.endsWith("/api/appointments")) {
+      if (stub.failAppointments) {
+        return { ok: false, status: 503, json: async () => ({ detail: "unavailable" }) };
+      }
       return ok({ appointment_id: randomUUID(), booked_at: "2026-07-10T10:00:00Z", date: body.preferred_date, time: body.preferred_time });
     }
     throw new Error(`unexpected fetch to ${url}`);
   }) as typeof fetch;
 
-  return { calls, restore: () => { globalThis.fetch = original; } };
+  return stub;
 }
 
 // ── Harness ───────────────────────────────────────────────────────────────────
@@ -201,6 +228,7 @@ describe("sales flow end-to-end", () => {
     ({ RealtimeHandler } = await import("../realtime/realtimeHandler.js"));
     fetchStub = installFetchStub();
   });
+  beforeEach(() => { fetchStub.reset(); });
   after(() => { fetchStub.restore(); });
 
   it("carries a clean lead from greeting through quote to a booked appointment and end_call", async () => {
@@ -247,8 +275,11 @@ describe("sales flow end-to-end", () => {
 
     // ── close ─────────────────────────────────────────────────────────────
     await callTool(socket, "book_appointment", { preferredDate: "2026-07-10", preferredTime: "10:00" });
-    const booked = bridge.find("appointment_booked");
-    assert.ok(booked, "appointment_booked must be published");
+
+    // Exactly one appointment_booked reaches Kafka, and eastwood-core is the one
+    // that publishes it. The agent writes through POST /api/appointments only.
+    assert.equal(fetchStub.countCalls("/api/appointments"), 1, "core must be written to exactly once");
+    assert.equal(bridge.count("appointment_booked"), 0, "agent must not publish appointment_booked — core does");
 
     await callTool(socket, "end_call", { outcome: "appointment_set" });
     const ended = bridge.find("call_ended");
@@ -258,7 +289,6 @@ describe("sales flow end-to-end", () => {
     assert.deepEqual(bridge.eventTypes(), [
       "field_captured", "field_captured", "field_captured", "field_captured", "field_captured",
       "quote_presented",
-      "appointment_booked",
       "call_ended",
     ]);
 
@@ -293,6 +323,25 @@ describe("sales flow end-to-end", () => {
 
     assert.ok(bridge.find("quote_presented"), "quote must still be reachable after Tier-2");
     assert.ok(socket.currentTools().includes("transfer_live"), "hot transfer available once quoted");
+  });
+
+  it("does not claim a booking when eastwood-core rejects the write", async () => {
+    const { socket, bridge } = await startCall();
+    fetchStub.failAppointments = true;
+
+    for (const task of tier1Plan()) {
+      await callTool(socket, "update_lead_field", { field: task.field, captureKey: task.captureKey, value: "none" });
+    }
+    await callTool(socket, "get_quote", { productLine: "final_expense", age: 68, state: "MI", faceValue: 10_000, tobaccoUser: false });
+    await callTool(socket, "book_appointment", { preferredDate: "2026-07-10", preferredTime: "10:00" });
+
+    assert.equal(bridge.count("appointment_booked"), 0, "a failed write must publish nothing");
+
+    // The model must learn the booking failed, not be told it succeeded.
+    const results = socket.sent.filter((m) => m["type"] === "conversation.item.create");
+    const last = JSON.parse(results[results.length - 1]!["item"]["output"]);
+    assert.equal(last.booked, false);
+    assert.ok(last.error, "must surface an error the agent can speak");
   });
 
   it("never gates the DNC escape hatch", async () => {
