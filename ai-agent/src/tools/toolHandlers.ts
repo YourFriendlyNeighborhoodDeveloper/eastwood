@@ -4,7 +4,7 @@ import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 import { loadConfig } from "../config.js";
 import { logger, toolInvocations } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
-import type { LeadContext } from "../types.js";
+import type { AcquisitionTask, LeadContext, ProductLine } from "../types.js";
 import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
 import { randomUUID } from "crypto";
 
@@ -25,26 +25,43 @@ export const toolHandlers: Record<string, ToolHandler> = {
         age: z.number().int(),
         state: z.string(),
         faceValue: z.number().int().optional(),
+        tobaccoUser: z.boolean().optional(),
+        gender: z.string().optional(),
       })
       .parse(input);
 
-    const correlationId = randomUUID();
-    let quote;
+    const cfg = loadConfig();
+    let quoteData: Record<string, unknown>;
     try {
-      quote = await bridge.requestQuote({
-        correlationId,
-        leadId: lead.leadId,
-        sessionId,
-        productLine: parsed.productLine,
-        age: parsed.age,
-        state: parsed.state,
-        faceValue: parsed.faceValue,
+      const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/quote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          product_line: parsed.productLine,
+          age: parsed.age,
+          state: parsed.state,
+          face_value: parsed.faceValue ?? 10_000,
+          tobacco: parsed.tobaccoUser ?? false,
+          gender: parsed.gender ?? null,
+          lead_id: lead.leadId,
+          condition_codes: [],
+        }),
       });
+      if (!resp.ok) throw new Error(`quote API ${resp.status}`);
+      quoteData = (await resp.json()) as Record<string, unknown>;
     } catch (err) {
-      logger.error({ err, correlationId }, "quote request failed");
+      logger.error({ err }, "get_quote HTTP call failed");
       toolInvocations.inc({ tool_name: "get_quote", outcome: "timeout" });
       return { error: "Quote service unavailable — please try again in a moment." };
     }
+
+    const best = quoteData["best"] as Record<string, unknown> | null;
+    const quote = {
+      productLine: parsed.productLine as ProductLine,
+      monthlyPremium: (best?.["monthly_premium"] as number) ?? 99.0,
+      carrier: (best?.["carrier"] as string) ?? "Eastwood Preferred",
+      faceValue: parsed.faceValue ?? 10_000,
+    };
 
     const policyCheck = policy.evaluateQuote(quote);
     if (!policyCheck.allowed) {
@@ -62,11 +79,14 @@ export const toolHandlers: Record<string, ToolHandler> = {
     actor.send({ type: "QUOTE_READY", quote } as Parameters<typeof actor.send>[0]);
     toolInvocations.inc({ tool_name: "get_quote", outcome: "success" });
 
+    const allOptions = (quoteData["all_options"] as unknown[])?.slice(0, 3) ?? [];
     return {
       productLine: quote.productLine,
       monthlyPremium: quote.monthlyPremium,
       faceValue: quote.faceValue,
       carrier: quote.carrier,
+      source: quoteData["quote_source"] ?? "formula",
+      topOptions: allOptions,
     };
   },
 
@@ -79,17 +99,85 @@ export const toolHandlers: Record<string, ToolHandler> = {
       })
       .parse(input);
 
+    const cfg = loadConfig();
+    let appointmentId: string = randomUUID();
+    try {
+      const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/appointments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          lead_id: lead.leadId,
+          session_id: sessionId,
+          preferred_date: parsed.preferredDate,
+          preferred_time: parsed.preferredTime,
+          notes: parsed.notes,
+        }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as Record<string, unknown>;
+        if (typeof data["appointment_id"] === "string") {
+          appointmentId = data["appointment_id"];
+        }
+      } else {
+        logger.warn({ status: resp.status }, "appointments API returned non-OK; falling back to Kafka-only");
+      }
+    } catch (err) {
+      logger.error({ err }, "book_appointment HTTP call failed; falling back to Kafka-only");
+    }
+
+    // Always publish the event — brain.py sends the SMS confirmation
     await bridge.publishEvent({
       eventType: "appointment_booked",
       leadId: lead.leadId,
       sessionId,
-      slotId: crypto.randomUUID(),
+      slotId: appointmentId,
     });
 
     actor.send({ type: "WRAP_UP" });
     toolInvocations.inc({ tool_name: "book_appointment", outcome: "success" });
 
-    return { booked: true, date: parsed.preferredDate, time: parsed.preferredTime };
+    return {
+      booked: true,
+      appointmentId,
+      date: parsed.preferredDate,
+      time: parsed.preferredTime,
+      message: `Your appointment is confirmed for ${parsed.preferredDate} at ${parsed.preferredTime}. You'll receive a confirmation text shortly.`,
+    };
+  },
+
+  add_followup_questions: async (input, { lead, sessionId }) => {
+    const parsed = z.object({ condition: z.string() }).parse(input);
+    const cfg = loadConfig();
+
+    let questions: AcquisitionTask[] = [];
+    try {
+      const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/agenda/followups`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lead_id: lead.leadId, condition: parsed.condition }),
+      });
+      if (resp.ok) {
+        const data = (await resp.json()) as { questions: AcquisitionTask[] };
+        questions = data.questions ?? [];
+      } else {
+        logger.warn({ status: resp.status, condition: parsed.condition }, "agenda/followups returned non-OK");
+      }
+    } catch (err) {
+      logger.error({ err }, "add_followup_questions HTTP call failed");
+    }
+
+    if (questions.length > 0) {
+      lead.acquisitionPlan = [...(lead.acquisitionPlan ?? []), ...questions];
+    }
+
+    toolInvocations.inc({ tool_name: "add_followup_questions", outcome: "success" });
+    logger.info({ sessionId, condition: parsed.condition, added: questions.length }, "followup questions added");
+
+    return {
+      condition: parsed.condition,
+      questionsAdded: questions.length,
+      nextQuestion: questions[0]?.question ?? null,
+    };
   },
 
   capture_objection: async (input, { lead, sessionId, bridge, actor }) => {

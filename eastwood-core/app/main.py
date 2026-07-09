@@ -109,6 +109,23 @@ async def lifespan(app: FastAPI):
                         )
                 logger.info("seeded %d carrier profiles (version=%s)", len(_cp_data["profiles"]), _version)
 
+    # Carrier rate table — truncate if RESET_RATE_TABLE_ON_BOOT=true, otherwise seed if empty
+    import os as _os
+    from db.models import CarrierRateTable as _CRTModel
+    if _os.environ.get("RESET_RATE_TABLE_ON_BOOT", "false").lower() == "true":
+        async with _get_engine().begin() as _rtw:
+            await _rtw.execute(text("TRUNCATE carrier_rate_tables"))
+        logger.warning("RESET_RATE_TABLE_ON_BOOT: carrier_rate_tables truncated — formula adapter will be used for all quotes")
+    else:
+        async with _get_engine().connect() as _rt_conn:
+            _rt_existing = await _rt_conn.execute(_select(_CRTModel).limit(1))
+            if _rt_existing.first() is None:
+                from scripts.seed_rate_tables import _all_seed_rows
+                _rt_rows = _all_seed_rows()
+                async with _get_engine().begin() as _rtw:
+                    await _rtw.execute(_CRTModel.__table__.insert(), _rt_rows)
+                logger.info("seeded %d carrier rate table rows", len(_rt_rows))
+
     from kafka_io.kafka_client import get_producer
     await get_producer()
 
@@ -191,11 +208,40 @@ async def lifespan(app: FastAPI):
                 logger.exception("followup worker error")
             await _asyncio.sleep(30)
 
+    # Dial-queue drain loop — fires queued calls every 3s
+    async def _dial_loop_wrapped():
+        while True:
+            try:
+                n = await brain.process_dial_queue()
+                if n:
+                    logger.info("dial worker fired %d calls", n)
+            except Exception:
+                logger.exception("dial worker error")
+            await _asyncio.sleep(3)
+
+    # Reaper — marks stuck 'dialing' entries as failed after 10 min
+    async def _reaper_loop_wrapped():
+        while True:
+            try:
+                from db.session import session_scope
+                from repos.repos import DialQueueRepo
+                async with session_scope() as _rs:
+                    n = await DialQueueRepo(_rs).reap_stuck_dialing(older_than_minutes=10)
+                    if n:
+                        logger.warning("reaped %d stuck dial_queue entries", n)
+            except Exception:
+                logger.exception("reaper error")
+            await _asyncio.sleep(60)
+
+    _dial_task = _asyncio.create_task(_dial_loop_wrapped())
     _followup_task = _asyncio.create_task(_followup_loop_wrapped())
+    _reaper_task = _asyncio.create_task(_reaper_loop_wrapped())
 
     yield
 
+    _dial_task.cancel()
     _followup_task.cancel()
+    _reaper_task.cancel()
     await consumer.stop()
     await stop_producer()
     await brain._ai_agent.aclose()

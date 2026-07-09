@@ -246,6 +246,187 @@ async def lead_source_roi(tenant_id: str | None = None, session: AsyncSession = 
     return {"sources": rows}
 
 
+# ── Real-time quoting ─────────────────────────────────────────────────────────
+
+@router.post("/api/quote")
+async def get_quote(request: Request, session: AsyncSession = Depends(get_session)):
+    """
+    Real-time carrier quoting. Hits rate tables (FE) or CMS API (Medicare) with formula fallback.
+    Used directly by the AI agent's get_quote tool.
+    """
+    from domain.quoting import CmsMedicareAdapter, FormulaAdapter, QuoteManager, QuoteRequest, RateTableAdapter
+
+    body: dict = await request.json()
+    settings = get_settings()
+
+    face_value_dollars = body.get("face_value", 10_000)
+    condition_codes: set[str] = set(body.get("condition_codes", []))
+    tobacco_raw = body.get("tobacco", False)
+    tobacco = tobacco_raw if isinstance(tobacco_raw, bool) else str(tobacco_raw).lower() in ("true", "yes", "1", "current")
+
+    req = QuoteRequest(
+        lead_id=body.get("lead_id", "api-test"),
+        product_line=body.get("product_line", "final_expense"),
+        age=body.get("age"),
+        state=body.get("state"),
+        zip_code=body.get("zip_code"),
+        county=body.get("county"),
+        face_value=int(face_value_dollars * 100),
+        tobacco=tobacco,
+        gender=body.get("gender"),
+        condition_codes=condition_codes,
+        rate_tier=body.get("rate_tier"),
+    )
+
+    cms_target = [c.strip() for c in settings.cms_target_carriers.split(",") if c.strip()]
+    manager = QuoteManager(
+        adapters=[
+            CmsMedicareAdapter(
+                ma_dataset_id=settings.cms_ma_dataset_id,
+                ms_dataset_id=settings.cms_ms_dataset_id or None,
+                target_carriers=cms_target,
+                timeout=settings.quote_timeout_seconds,
+            ),
+            RateTableAdapter(session=session),
+            FormulaAdapter(),
+        ],
+        timeout=settings.quote_timeout_seconds,
+    )
+
+    response = await manager.get_quotes(req)
+    best = response.best
+
+    def _source_label(src: str) -> str:
+        return "estimate" if src == "formula" else src
+
+    return {
+        "quote_source": _source_label(response.source),
+        "fetched_at": response.fetched_at,
+        "best": {
+            "carrier":         best.carrier,
+            "monthly_premium": best.monthly_premium,
+            "rate_tier":       best.rate_tier,
+            "plan_name":       best.plan_name,
+            "source":          _source_label(best.source),
+        } if best else None,
+        "all_options": [
+            {
+                "carrier":         q.carrier,
+                "monthly_premium": q.monthly_premium,
+                "rate_tier":       q.rate_tier,
+                "plan_name":       q.plan_name,
+                "source":          _source_label(q.source),
+            }
+            for q in response.quotes
+        ],
+        "errors": response.errors,
+    }
+
+
+# ── Appointment booking ───────────────────────────────────────────────────────
+
+@router.post("/api/appointments", status_code=201)
+async def create_appointment(request: Request, session: AsyncSession = Depends(get_session)):
+    """
+    Create an appointment from a date/time preference expressed by the AI agent.
+    Stores in the appointments table and fires the appointment_booked Kafka event (→ SMS).
+    """
+    import uuid as _uuid
+    from datetime import datetime, timedelta, timezone
+    from db.models import Appointment as _ApptModel, BookingSlot as _SlotModel
+
+    body: dict = await request.json()
+    settings = get_settings()
+
+    lead_id_str = body.get("lead_id")
+    session_id = body.get("session_id", "")
+    preferred_date = body.get("preferred_date")
+    preferred_time = body.get("preferred_time", "10:00")
+    notes = body.get("notes")
+
+    if not lead_id_str or not preferred_date:
+        raise HTTPException(status_code=422, detail="lead_id and preferred_date are required")
+
+    try:
+        starts_at = datetime.fromisoformat(f"{preferred_date}T{preferred_time}").replace(tzinfo=timezone.utc)
+    except ValueError:
+        starts_at = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+    ends_at = starts_at + timedelta(hours=1)
+
+    slot = _SlotModel(
+        tenant_id=settings.default_tenant_id,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        available=False,
+    )
+    session.add(slot)
+    await session.flush()
+
+    appointment = _ApptModel(
+        lead_id=_uuid.UUID(lead_id_str),
+        slot_id=slot.id,
+        tenant_id=settings.default_tenant_id,
+        status="scheduled",
+        notes=notes,
+    )
+    session.add(appointment)
+    await session.flush()
+    await session.commit()
+
+    await publish(
+        settings.topic_agent_events,
+        {
+            "eventType": "appointment_booked",
+            "leadId": lead_id_str,
+            "sessionId": session_id,
+            "slotId": str(slot.id),
+        },
+        key=lead_id_str,
+    )
+
+    return {
+        "appointment_id": str(appointment.id),
+        "booked_at": starts_at.isoformat(),
+        "date": preferred_date,
+        "time": preferred_time,
+    }
+
+
+# ── Acquisition agenda ────────────────────────────────────────────────────────
+
+@router.post("/api/agenda/followups")
+async def agenda_followups(request: Request, session: AsyncSession = Depends(get_session)):
+    """
+    Return Tier 2 follow-up questions for a condition the prospect just confirmed.
+    Skips any questions already present in the lead's health_data.
+    """
+    import uuid as _uuid
+    from domain.acquisition import get_followup_tasks, plan_to_context
+    from db.models import Lead as _Lead
+
+    body: dict = await request.json()
+    condition = body.get("condition", "").lower().strip()
+    lead_id_str = body.get("lead_id", "")
+
+    if not condition:
+        raise HTTPException(status_code=422, detail="condition is required")
+
+    health_data: dict = {}
+    if lead_id_str:
+        try:
+            from sqlalchemy import select as _sel
+            row = await session.execute(_sel(_Lead).where(_Lead.id == _uuid.UUID(lead_id_str)))
+            lead_row = row.scalar_one_or_none()
+            if lead_row:
+                health_data = lead_row.health_data or {}
+        except Exception:
+            pass
+
+    tasks = get_followup_tasks(condition, health_data)
+    return {"condition": condition, "questions": plan_to_context(tasks)}
+
+
 # ── Carrier placement ─────────────────────────────────────────────────────────
 
 @router.post("/api/triage/place")
@@ -531,6 +712,40 @@ def _build_opener(lead, placement, hd: dict) -> str:
         f"Hi {name}, I'm following up on your {product} inquiry — "
         f"do you have a few minutes to go over your options?"
     )
+
+
+@router.post("/twilio/status/{session_id}")
+async def twilio_status_callback(
+    session_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Twilio fires this when a call reaches a terminal status.
+    Marks the matching dial_queue entry so the concurrency slot is freed."""
+    from repos.repos import DialQueueRepo
+
+    form = await request.form()
+    call_status = str(form.get("CallStatus", ""))
+
+    terminal_map = {
+        "completed": "completed",
+        "no-answer": "no_answer",
+        "busy": "busy",
+        "failed": "failed",
+        "canceled": "cancelled",
+    }
+    new_status = terminal_map.get(call_status)
+    if not new_status:
+        return {"received": True}
+
+    dq_repo = DialQueueRepo(session)
+    entry = await dq_repo.get_by_session(session_id)
+    if entry:
+        await dq_repo.mark_terminal(entry.id, new_status)
+        await session.commit()
+        logger.info("twilio status callback: session=%s status=%s", session_id, new_status)
+
+    return {"received": True, "status": new_status}
 
 
 @router.get("/api/dashboard/summary")

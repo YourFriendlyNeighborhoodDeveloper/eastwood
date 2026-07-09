@@ -5,7 +5,7 @@ const ConfigSchema = z.object({
   kafkaBrokers: z.string().min(1),
   openaiApiKey: z.string().default(""),
   eastwoodCoreBaseUrl: z.string().url().default("http://eastwood-core:8080"),
-  agentDisplayName: z.string().default("Alex"),
+  agentDisplayName: z.string().default("Imogen"),
   agencyName: z.string().default("Eastwood Financial"),
   port: z.coerce.number().int().positive().default(8081),
   logLevel: z.string().default("info"),

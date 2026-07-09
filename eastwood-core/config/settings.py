@@ -67,6 +67,12 @@ class Settings(BaseSettings):
         "us back. Have a great day!"
     )
 
+    # ── Real-time quoting ────────────────────────────────────────────────────
+    cms_ma_dataset_id: str = "pjlv-rqvd"
+    cms_ms_dataset_id: str = ""
+    cms_target_carriers: str = "aetna,humana,cvs"
+    quote_timeout_seconds: float = 6.0
+
     # Comma-separated list of states where carriers are configured and auto-dial is active.
     # Set ACTIVE_STATES=MI,TX,FL,CA etc. to expand coverage.
     active_states: str = "MI"

@@ -15,8 +15,8 @@ export type SalesState =
 
 export const ALLOWED_TOOLS: Record<SalesState, string[]> = {
   greeting: ["capture_dnc", "update_lead_field"],
-  discovery: ["capture_dnc", "capture_objection", "update_lead_field"],
-  qualifying: ["capture_dnc", "capture_objection", "update_lead_field"],
+  discovery: ["capture_dnc", "capture_objection", "update_lead_field", "add_followup_questions"],
+  qualifying: ["capture_dnc", "capture_objection", "update_lead_field", "add_followup_questions"],
   quoting: ["get_quote", "capture_dnc", "capture_objection", "update_lead_field"],
   objection_handling: ["capture_objection", "capture_dnc", "get_quote"],
   closing: ["book_appointment", "transfer_live", "capture_consent", "capture_dnc", "capture_objection"],

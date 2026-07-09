@@ -38,6 +38,15 @@ services:
       /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic agent.events --partitions 3 --replication-factor 1 &&
       /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic consent.events --partitions 3 --replication-factor 1 &&
       /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic dlq.events --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.field_captured --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.quote_requested --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.quote_ready --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.quote_presented --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.objection_captured --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.consent_captured --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.dnc_requested --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.live_transfer_requested --partitions 3 --replication-factor 1 &&
+      /opt/bitnami/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic calls.ended --partitions 3 --replication-factor 1 &&
       echo 'Kafka topics ready.'"
     restart: "no"
 
@@ -101,6 +110,8 @@ services:
       EASTWOOD_TWILIO_AUTH_TOKEN: ${EASTWOOD_TWILIO_AUTH_TOKEN:-}
       EASTWOOD_TWILIO_FROM_NUMBER: ${EASTWOOD_TWILIO_FROM_NUMBER:-}
       SCORE_HOT_THRESHOLD: ${SCORE_HOT_THRESHOLD:-75}
+      BYPASS_TCPA: ${BYPASS_TCPA:-false}
+      RESET_RATE_TABLE_ON_BOOT: ${RESET_RATE_TABLE_ON_BOOT:-false}
       CMS_MA_DATASET_ID: ${CMS_MA_DATASET_ID:-pjlv-rqvd}
       CMS_MS_DATASET_ID: ${CMS_MS_DATASET_ID:-}
       CMS_TARGET_CARRIERS: ${CMS_TARGET_CARRIERS:-aetna,humana,cvs}
@@ -127,7 +138,7 @@ services:
       EASTWOOD_CORE_BASE_URL: http://eastwood-core:8080
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       REALTIME_MODEL: gpt-realtime-mini-2025-12-15
-      REALTIME_VOICE: ash
+      REALTIME_VOICE: shimmer
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
@@ -136,6 +147,7 @@ services:
       EASTWOOD_TWILIO_AUTH_TOKEN: ${EASTWOOD_TWILIO_AUTH_TOKEN:-}
       EASTWOOD_TWILIO_FROM_NUMBER: ${EASTWOOD_TWILIO_FROM_NUMBER:-}
       SCORE_HOT_THRESHOLD: ${SCORE_HOT_THRESHOLD:-75}
+      BYPASS_TCPA: ${BYPASS_TCPA:-false}
       
 
   nginx:

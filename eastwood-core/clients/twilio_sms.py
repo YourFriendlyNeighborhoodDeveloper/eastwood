@@ -19,12 +19,13 @@ class SmsClient:
         )
         return message.sid
 
-    def make_call(self, to: str, twiml_url: str) -> str:
-        call = self._client.calls.create(
-            to=to,
-            from_=self._from_number,
-            url=twiml_url,
-        )
+    def make_call(self, to: str, twiml_url: str, status_callback_url: str | None = None) -> str:
+        kwargs: dict = dict(to=to, from_=self._from_number, url=twiml_url)
+        if status_callback_url:
+            kwargs["status_callback"] = status_callback_url
+            kwargs["status_callback_event"] = ["completed", "no-answer", "busy", "failed", "canceled"]
+            kwargs["status_callback_method"] = "POST"
+        call = self._client.calls.create(**kwargs)
         return call.sid
 
     def make_call_with_amd(self, to: str, twiml_url: str, amd_callback_url: str) -> str:

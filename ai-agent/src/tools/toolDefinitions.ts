@@ -163,6 +163,24 @@ export const ALL_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: "add_followup_questions",
+    description:
+      "Call this immediately after the prospect confirms a health condition during the screening question. " +
+      "It loads the condition-specific follow-up questions into your agenda so you can ask them in order. " +
+      "Only call after the prospect has explicitly named the condition — never assume or pre-load.",
+    parameters: {
+      type: "object",
+      required: ["condition"],
+      properties: {
+        condition: {
+          type: "string",
+          enum: ["cancer", "heart_attack", "stroke", "diabetes", "copd", "kidney_disease"],
+          description: "The condition the prospect just explicitly confirmed.",
+        },
+      },
+    },
+  },
+  {
     name: "update_lead_field",
     description:
       "Record a field captured from the prospect during the data collection agenda. " +

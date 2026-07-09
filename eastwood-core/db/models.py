@@ -275,6 +275,29 @@ class DialQueueEntry(Base):
     )
 
 
+class CarrierRateTable(Base):
+    """
+    Carrier-published rate tables — ground truth for actual premiums.
+    One row = one quote cell: carrier × product × tier × state × age × tobacco × face_value.
+    """
+    __tablename__ = "carrier_rate_tables"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    carrier_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    product_line: Mapped[str] = mapped_column(String(64), nullable=False)
+    rate_tier: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str | None] = mapped_column(String(2))
+    age: Mapped[int] = mapped_column(Integer, nullable=False)
+    gender: Mapped[str | None] = mapped_column(String(1))
+    tobacco: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    face_value_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    monthly_premium_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    effective_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    expires_date: Mapped[datetime | None] = mapped_column(Date)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class LeadFieldEvent(Base):
     """Immutable mutation log for every field captured on a lead — audit trail."""
     __tablename__ = "lead_field_events"

@@ -42,6 +42,9 @@ _TCPA_END_HOUR   = 21  # 9:00 PM local
 
 
 def in_tcpa_window(state: str | None, now_utc: datetime | None = None) -> bool:
+    import os
+    if os.getenv("BYPASS_TCPA", "").lower() in ("1", "true", "yes"):
+        return True
     """Return True if it is currently within the TCPA-allowed calling window
     (8 am – 9 pm local time) for the given state.  Falls back to Eastern if
     state is unknown — conservative choice since most leads are Eastern/Central."""

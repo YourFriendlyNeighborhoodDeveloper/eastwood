@@ -13,6 +13,7 @@ from db.models import (
     BookingSlot,
     CallRecord,
     CarrierProfileModel,
+    CarrierRateTable,
     ConsentRecord,
     DialQueueEntry,
     FollowupTask,
@@ -524,7 +525,10 @@ class DialQueueRepo:
 
     async def get_by_session(self, session_id: str) -> DialQueueEntry | None:
         result = await self._s.execute(
-            select(DialQueueEntry).where(DialQueueEntry.session_id == session_id)
+            select(DialQueueEntry)
+            .where(DialQueueEntry.session_id == session_id)
+            .order_by(DialQueueEntry.updated_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
 
@@ -569,6 +573,32 @@ class DialQueueRepo:
                 updated_at=datetime.now(timezone.utc),
             )
         )
+
+    async def update_session_id(self, entry_id: uuid.UUID, session_id: str) -> None:
+        await self._s.execute(
+            update(DialQueueEntry)
+            .where(DialQueueEntry.id == entry_id)
+            .values(session_id=session_id, updated_at=datetime.now(timezone.utc))
+        )
+
+    async def mark_terminal(self, entry_id: uuid.UUID, status: str) -> None:
+        """Mark a dial_queue entry at a terminal status, freeing the concurrency slot."""
+        await self._s.execute(
+            update(DialQueueEntry)
+            .where(DialQueueEntry.id == entry_id)
+            .values(status=status, updated_at=datetime.now(timezone.utc))
+        )
+
+    async def reap_stuck_dialing(self, older_than_minutes: int = 10) -> int:
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+        result = await self._s.execute(
+            update(DialQueueEntry)
+            .where(DialQueueEntry.status == "dialing")
+            .where(DialQueueEntry.updated_at < cutoff)
+            .values(status="failed", updated_at=datetime.now(timezone.utc))
+        )
+        return result.rowcount or 0
 
     async def cancel_for_lead(self, lead_id: uuid.UUID) -> None:
         await self._s.execute(
@@ -659,6 +689,27 @@ class CarrierProfileRepo:
         for p in profiles:
             self._s.add(CarrierProfileModel(**p))
         await self._s.flush()
+
+
+class RateTableRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+
+    async def has_rows(self, product_line: str) -> bool:
+        from sqlalchemy import func as sqlfunc
+        result = await self._s.execute(
+            select(sqlfunc.count(CarrierRateTable.id)).where(
+                CarrierRateTable.product_line == product_line,
+                CarrierRateTable.is_active == True,  # noqa: E712
+            )
+        )
+        return (result.scalar_one() or 0) > 0
+
+    async def bulk_insert(self, rows: list[dict]) -> int:
+        for r in rows:
+            self._s.add(CarrierRateTable(**r))
+        await self._s.flush()
+        return len(rows)
 
 
 class LeadFieldEventRepo:

@@ -117,8 +117,8 @@ def triage_from_lead_dict(lead: dict, health_data: dict | None = None, ruleset: 
 
     hd = health_data or {}
 
-    conditions = [Condition(**c) for c in hd.get("conditions", [])]
-    medications = [Medication(**m) for m in hd.get("medications", [])]
+    conditions = [Condition(**(c if isinstance(c, dict) else {"code": c})) for c in hd.get("conditions", [])]
+    medications = [Medication(**(m if isinstance(m, dict) else {"code": m})) for m in hd.get("medications", [])]
 
     compliance = Compliance(
         on_dnc=lead.get("on_dnc"),

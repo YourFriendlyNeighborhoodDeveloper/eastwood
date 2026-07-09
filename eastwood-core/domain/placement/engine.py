@@ -32,7 +32,18 @@ def _profiles_from_db(db_rows: list) -> list[CarrierProfile]:
         ))
     return out
 
-# Map condition code → carrier-specific follow-up questions needed
+# Map screening-level condition name → ordered follow-up question keys
+# These are asked ONLY after the prospect explicitly confirms the condition.
+CONDITION_FOLLOWUPS: dict[str, list[str]] = {
+    "cancer":         ["cancer_type", "treatment_end_date", "remission_confirmed", "treatment_status"],
+    "heart_attack":   ["heart_attack_date", "stents", "bypass", "current_meds"],
+    "stroke":         ["stroke_date", "residual_deficits", "current_meds"],
+    "diabetes":       ["diabetes_type", "a1c", "complications", "diagnosis_date"],
+    "copd":           ["oxygen_use", "fev1", "hospitalizations_past_year"],
+    "kidney_disease": ["dialysis_frequency", "transplant_listed"],
+}
+
+# Map carrier condition code → carrier-specific follow-up questions needed
 CONDITION_QUESTIONS: dict[str, list[str]] = {
     "diabetes_oral_controlled": ["diabetes_type", "a1c", "complications"],
     "diabetes_insulin":         ["diabetes_type", "a1c", "complications", "diagnosis_date"],

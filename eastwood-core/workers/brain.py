@@ -444,7 +444,7 @@ class WorkersBrain:
                 calls_fired += 1
                 # Fire in background so the session lock doesn't block the loop
                 asyncio.create_task(
-                    self._initiate_queued_call(lead, entry.id, entry.tenant_id)
+                    self._initiate_call(lead, entry.tenant_id, dial_queue_entry_id=entry.id)
                 )
 
         return calls_fired
@@ -545,7 +545,7 @@ class WorkersBrain:
             top_option.monthly_premium_est if top_option else 99.0,
         )
 
-    async def _initiate_call(self, lead: Any, tenant_id: str) -> None:
+    async def _initiate_call(self, lead: Any, tenant_id: str, dial_queue_entry_id: uuid.UUID | None = None) -> None:
         from domain.acquisition import build_acquisition_plan, plan_to_context
         from domain.placement import place as placement_place
         try:
@@ -576,7 +576,6 @@ class WorkersBrain:
             plan = build_acquisition_plan(
                 lead={"age": lead.age},
                 health_data=hd,
-                extra_questions=placement.missing_questions,
             )
             context = {
                 "phone_e164":       lead.phone_e164,
@@ -598,16 +597,22 @@ class WorkersBrain:
             session_resp = await self._ai_agent.start_session(str(lead.id), context)
             session_id = session_resp.get("session_id")
 
+            # Update the dial_queue entry with the real session_id so the
+            # Twilio status callback can look it up by session_id.
+            if dial_queue_entry_id and session_id:
+                async with session_scope() as _dq_session:
+                    from repos.repos import DialQueueRepo as _DQRepo
+                    await _DQRepo(_dq_session).update_session_id(dial_queue_entry_id, session_id)
+
             public_base = self._settings.public_base_url.rstrip("/")
             if public_base and self._sms and session_id:
-                # TwiML URL tells Twilio what to do when the call connects.
-                # Twilio GETs this URL, we return <Connect><Stream> pointing at
-                # the ai-agent WebSocket (proxied through nginx at /agent/).
                 twiml_url = f"{public_base}/twiml/call/{session_id}"
+                status_callback_url = f"{public_base}/twilio/status/{session_id}"
                 await asyncio.to_thread(
                     self._sms.make_call,
                     lead.phone_e164,
                     twiml_url,
+                    status_callback_url,
                 )
                 logger.info(
                     "outbound call queued lead=%s session=%s to=%s",
