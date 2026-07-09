@@ -1,4 +1,4 @@
-import type { AcquisitionTask, LeadContext, Quote } from "../types.js";
+import type { AcquisitionTask, LeadContext, SessionState } from "../types.js";
 
 /**
  * Derives which tools the model may call, from what we actually know about the
@@ -43,8 +43,19 @@ export function discoveryComplete(lead: LeadContext): boolean {
 
 export function deriveAllowedTools(
   lead: LeadContext,
-  quote: Quote | null
+  session: SessionState
 ): string[] {
+  // A prospect who has asked not to be called is no longer being sold to; the
+  // only thing left is to hang up. This must precede every other rule.
+  //
+  // The machine models this as the `terminating` state, but nothing reads the
+  // machine's state, so revocation has to live here. Deriving tools from lead
+  // data alone previously left get_quote and book_appointment on the table
+  // after a DNC — the prompt was the only thing stopping her from selling on.
+  if (session.dncCaptured) {
+    return ["end_call"];
+  }
+
   const allowed = new Set<string>(ALWAYS_ALLOWED);
 
   // Anything still on the agenda needs a way to be recorded — Tier-1 screening,
@@ -60,7 +71,7 @@ export function deriveAllowedTools(
     allowed.add("get_quote");
   }
 
-  if (quote !== null) {
+  if (session.quote !== null) {
     allowed.add("book_appointment");
     allowed.add("transfer_live");
     allowed.add("transfer_to_human");

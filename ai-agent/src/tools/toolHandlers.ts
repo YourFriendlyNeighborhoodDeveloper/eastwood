@@ -295,7 +295,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     return { captured: true, consentType: parsed.consentType };
   },
 
-  capture_dnc: async (input, { lead, sessionId, bridge, actor }) => {
+  capture_dnc: async (input, { lead, sessionId, bridge, actor, session }) => {
     const parsed = z
       .object({ phoneE164: z.string(), reason: z.string().optional() })
       .parse(input);
@@ -306,6 +306,10 @@ export const toolHandlers: Record<string, ToolHandler> = {
       sessionId,
       phoneE164: parsed.phoneE164,
     });
+
+    // Revokes every selling tool on the next session.update, and forces the
+    // call outcome to "dnc" so no follow-up sequence is ever scheduled.
+    session.dncCaptured = true;
 
     actor.send({ type: "DNC" });
     toolInvocations.inc({ tool_name: "capture_dnc", outcome: "success" });
@@ -362,11 +366,22 @@ export const toolHandlers: Record<string, ToolHandler> = {
       .object({ outcome: z.string().optional(), notes: z.string().optional() })
       .parse(input);
 
+    // A DNC'd call has exactly one outcome. "callback" or "not_interested" would
+    // still be a non-terminal outcome in schedule_for_outcome, and would text a
+    // prospect who just asked never to be contacted again.
+    let outcome = parsed.outcome;
+    if (session.dncCaptured && outcome !== "dnc") {
+      if (outcome) {
+        logger.warn({ sessionId, claimed: outcome }, "overriding call outcome to dnc");
+      }
+      outcome = "dnc";
+    }
+
     await bridge.publishEvent({
       eventType: "call_ended",
       leadId: lead.leadId,
       sessionId,
-      outcome: parsed.outcome,
+      outcome,
     });
     // Suppress the hangup-path call_ended that endSession would otherwise emit
     // when the telephony stream closes a moment later.
@@ -375,7 +390,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     actor.send({ type: "END" });
     toolInvocations.inc({ tool_name: "end_call", outcome: "success" });
 
-    return { ended: true, outcome: parsed.outcome };
+    return { ended: true, outcome };
   },
 
   update_lead_field: async (input, { lead, sessionId, bridge }) => {

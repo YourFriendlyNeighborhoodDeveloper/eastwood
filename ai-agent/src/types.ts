@@ -73,6 +73,8 @@ export type Objection = z.infer<typeof ObjectionSchema>;
 export interface SessionState {
   quote: Quote | null;
   appointmentBooked: boolean;
+  /** Set once the prospect has asked not to be called. Revokes every selling tool. */
+  dncCaptured: boolean;
   /** Set once call_ended has been published, so endSession does not emit a second. */
   callEndedPublished: boolean;
 }

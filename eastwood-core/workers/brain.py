@@ -301,6 +301,44 @@ class WorkersBrain:
                     },
                 )
 
+            elif event_type == "dnc_request":
+                lead_repo = LeadRepo(session)
+                suppression_repo = SuppressionRepo(session)
+                dq_repo = DialQueueRepo(session)
+
+                tenant_id = (
+                    msg.get("tenantId")
+                    or msg.get("tenant_id")
+                    or self._settings.default_tenant_id
+                )
+                lead = await lead_repo.get_by_id(lead_id)
+                if not lead:
+                    logger.error("dnc_request for unknown lead %s — nothing suppressed", lead_id)
+                    return
+
+                # Suppress the number we dialled, never the one the model read back
+                # to us. A misheard digit would suppress a stranger and leave this
+                # prospect dialable.
+                phone = lead.phone_e164
+                claimed = msg.get("phoneE164") or msg.get("phone_e164")
+                if claimed and claimed != phone:
+                    logger.warning(
+                        "dnc_request phone mismatch on lead %s: agent reported %s, suppressing %s",
+                        lead_id, claimed, phone,
+                    )
+
+                if not await suppression_repo.is_suppressed(tenant_id, phone):
+                    await suppression_repo.add(
+                        tenant_id,
+                        phone,
+                        reason="dnc_request",
+                        notes=f"requested on call, session={session_id}",
+                    )
+                    logger.info("suppressed %s (lead %s) — DNC requested on call", phone, lead_id)
+
+                await lead_repo.update_status(lead_id, "suppressed")
+                await dq_repo.cancel_for_lead(lead_id)
+
             elif event_type == "live_transfer_requested":
                 await self._handle_live_transfer(lead_id, session_id, msg)
 

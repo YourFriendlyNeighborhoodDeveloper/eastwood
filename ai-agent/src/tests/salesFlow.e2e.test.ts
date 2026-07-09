@@ -542,4 +542,47 @@ describe("sales flow end-to-end", () => {
     assert.ok(dnc, "dnc_request must be published immediately");
     assert.ok(socket.currentTools().includes("end_call"), "must still be able to hang up after DNC");
   });
+
+  it("revokes every selling tool the moment a DNC is captured", async () => {
+    const { socket, lead } = await startCall();
+
+    // Get as far as possible first: quoted, ready to book.
+    await completeDiscovery(socket);
+    await callTool(socket, "get_quote", QUOTE_ARGS);
+    assert.ok(socket.currentTools().includes("book_appointment"), "precondition: closing tools are live");
+
+    await callTool(socket, "capture_dnc", { phoneE164: lead.phoneE164, reason: "take me off your list" });
+
+    // Only one thing left to do.
+    assert.deepEqual(socket.currentTools(), ["end_call"]);
+    for (const tool of ["get_quote", "book_appointment", "transfer_live", "transfer_to_human", "update_lead_field", "capture_consent", "capture_objection"]) {
+      assert.ok(!socket.currentTools().includes(tool), `${tool} must be revoked after a DNC`);
+    }
+  });
+
+  it("forces the call outcome to dnc even when the model reports otherwise", async () => {
+    const { socket, bridge, lead } = await startCall();
+
+    await callTool(socket, "capture_dnc", { phoneE164: lead.phoneE164 });
+    await callTool(socket, "end_call", { outcome: "callback" });
+
+    // "callback" is non-terminal in schedule_for_outcome — it would text them.
+    assert.equal(bridge.find("call_ended")!["outcome"], "dnc");
+    assert.equal(socket.lastToolResult().outcome, "dnc");
+  });
+
+  it("reports a hangup after a DNC as dnc, not as an unclosed quote", async () => {
+    const { socket, tele, bridge, lead } = await startCall();
+
+    await completeDiscovery(socket);
+    await callTool(socket, "get_quote", QUOTE_ARGS);
+    await callTool(socket, "capture_dnc", { phoneE164: lead.phoneE164 });
+
+    tele.hangUp(); // they hang up rather than letting her wrap up
+    await waitFor(() => bridge.count("call_ended") === 1, "call_ended after DNC hangup");
+
+    // Without this, brain.py schedules the quoted_not_closed sequence: three SMS
+    // over a week to someone who just asked never to be contacted again.
+    assert.equal(bridge.find("call_ended")!["outcome"], "dnc");
+  });
 });

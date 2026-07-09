@@ -28,6 +28,7 @@ interface ActiveSession {
   /** Set by the get_quote tool. Drives which closing tools are exposed. */
   quote: Quote | null;
   appointmentBooked: boolean;
+  dncCaptured: boolean;
   callEndedPublished: boolean;
   openaiWs: WebSocket | null;
   telephonyWs: WebSocket | null;
@@ -68,6 +69,7 @@ export class RealtimeHandler {
       actor,
       quote: null,
       appointmentBooked: false,
+      dncCaptured: false,
       callEndedPublished: false,
       openaiWs: null,
       telephonyWs: null,
@@ -139,7 +141,7 @@ export class RealtimeHandler {
 
   private pushSessionUpdate(session: ActiveSession): void {
     const cfg = loadConfig();
-    const allowedTools = deriveAllowedTools(session.lead, session.quote);
+    const allowedTools = deriveAllowedTools(session.lead, session);
     const tools = filterToolsByAllowed(allowedTools).map((t) => ({
       type: "function",
       name: t.name,
@@ -272,6 +274,10 @@ export class RealtimeHandler {
    * follow-up sequence, so it must name what actually happened.
    */
   private hangupOutcome(session: ActiveSession): string {
+    // Checked first. "dnc" is terminal in schedule_for_outcome, so it schedules
+    // nothing. Reporting "quoted_not_closed" for someone who asked to be removed
+    // would text them three times over the next week.
+    if (session.dncCaptured) return "dnc";
     if (session.appointmentBooked) return "appointment_set";
     if (session.quote) return "quoted_not_closed";
     return "hangup";
