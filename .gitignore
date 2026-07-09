@@ -4,6 +4,15 @@
 .env.*
 !.env.example
 
+# ── Private lead data ─────────────────────────────────────────────────────────
+# Purchased lead lists contain consumer PII and must never be committed.
+# Deliberately NOT ignoring *.csv wholesale: carrier rate sheets are reference
+# data and may legitimately be versioned.
+Leads_Export_*.csv
+*.local.csv
+data/private/
+exports/private/
+
 # ── Dependencies ──────────────────────────────────────────────────────────────
 node_modules/
 .venv/

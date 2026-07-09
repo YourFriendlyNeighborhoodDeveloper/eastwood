@@ -1,4 +1,35 @@
-node_modules
+# Build context for the ai-agent image (docker-compose: build ./ai-agent).
+# The build stage runs `npm ci` and then `COPY . .`, so node_modules must stay
+# excluded or the resolved dependency tree would be overwritten by the local one.
+#
+# NOTE: .dockerignore uses Go filepath.Match, not gitignore semantics. `**/`
+# matches at any depth, including zero directories.
+
+# Dependencies and build output
+**/node_modules
 dist
-.env
-*.log
+**/*.tsbuildinfo
+
+# Secrets
+**/.env
+**/.env.*
+
+# Private lead data — consumer PII must never reach an image layer
+**/Leads_Export_*.csv
+**/*.local.csv
+**/data/private
+**/exports/private
+
+# Test and coverage caches
+**/coverage
+**/.nyc_output
+
+# Git metadata
+.git
+.gitignore
+
+# OS junk and logs
+**/.DS_Store
+**/._*
+**/Thumbs.db
+**/*.log

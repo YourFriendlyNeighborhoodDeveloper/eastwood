@@ -1,0 +1,49 @@
+# Build context for the repo-root Dockerfile, which does `COPY . .`.
+# docker-compose builds ./eastwood-core and ./ai-agent instead — each has its own
+# .dockerignore, because a .dockerignore only applies to its own build context.
+# This file guards a plain `docker build .` from the repo root.
+#
+# NOTE: .dockerignore uses Go filepath.Match, not gitignore semantics. `**/`
+# matches at any depth, including zero directories.
+
+# Secrets
+**/.env
+**/.env.*
+
+# Private lead data — consumer PII must never reach an image layer
+**/Leads_Export_*.csv
+**/*.local.csv
+**/data/private
+**/exports/private
+
+# Dependencies and build output
+**/node_modules
+**/dist
+**/build
+**/*.tsbuildinfo
+
+# Python bytecode, virtualenvs, packaging output
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/venv
+**/*.egg-info
+
+# Test and lint caches
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/.coverage.*
+**/htmlcov
+**/coverage
+
+# Git metadata
+.git
+.gitignore
+
+# OS junk and logs
+**/.DS_Store
+**/._*
+**/Thumbs.db
+**/*.log
