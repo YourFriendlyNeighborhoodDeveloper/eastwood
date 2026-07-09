@@ -59,6 +59,15 @@ export const ObjectionSchema = z.object({
 });
 export type Objection = z.infer<typeof ObjectionSchema>;
 
+/**
+ * Mutable per-call state that tool handlers read and write. Deliberately narrow:
+ * RealtimeHandler's ActiveSession satisfies it structurally, so handlers can
+ * record a quote without importing the handler (and creating a cycle).
+ */
+export interface SessionState {
+  quote: Quote | null;
+}
+
 export const AgentEventSchema = z.discriminatedUnion("eventType", [
   z.object({
     eventType: z.literal("quote_presented"),

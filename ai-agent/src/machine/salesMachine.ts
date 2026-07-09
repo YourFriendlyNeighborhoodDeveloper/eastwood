@@ -13,6 +13,12 @@ export type SalesState =
   | "terminating"
   | "done";
 
+/**
+ * @deprecated Not used for tool gating. Nothing sends the ADVANCE event, so this
+ * machine never leaves `greeting`, and gating on it left the agent unable to
+ * quote, book, transfer or hang up. Tool availability is derived from lead data
+ * in tools/toolGating.ts. Kept only as a record of the intended stage model.
+ */
 export const ALLOWED_TOOLS: Record<SalesState, string[]> = {
   greeting: ["capture_dnc", "update_lead_field"],
   discovery: ["capture_dnc", "capture_objection", "update_lead_field", "add_followup_questions"],

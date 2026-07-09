@@ -4,7 +4,7 @@ import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 import { loadConfig } from "../config.js";
 import { logger, toolInvocations } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
-import type { AcquisitionTask, LeadContext, ProductLine } from "../types.js";
+import type { AcquisitionTask, LeadContext, ProductLine, SessionState } from "../types.js";
 import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
 import { randomUUID } from "crypto";
 
@@ -14,11 +14,17 @@ type ToolInput = Record<string, unknown>;
 
 export type ToolHandler = (
   input: ToolInput,
-  ctx: { lead: LeadContext; sessionId: string; bridge: KafkaBridge; actor: Actor<any> }
+  ctx: {
+    lead: LeadContext;
+    sessionId: string;
+    bridge: KafkaBridge;
+    actor: Actor<any>;
+    session: SessionState;
+  }
 ) => Promise<Record<string, unknown>>;
 
 export const toolHandlers: Record<string, ToolHandler> = {
-  get_quote: async (input, { lead, sessionId, bridge, actor }) => {
+  get_quote: async (input, { lead, sessionId, bridge, actor, session }) => {
     const parsed = z
       .object({
         productLine: z.string(),
@@ -75,6 +81,10 @@ export const toolHandlers: Record<string, ToolHandler> = {
       sessionId,
       quote,
     });
+
+    // Source of truth for tool gating. The machine also receives QUOTE_READY, but
+    // it only handles that event in the `quoting` state, which nothing reaches.
+    session.quote = quote;
 
     actor.send({ type: "QUOTE_READY", quote } as Parameters<typeof actor.send>[0]);
     toolInvocations.inc({ tool_name: "get_quote", outcome: "success" });

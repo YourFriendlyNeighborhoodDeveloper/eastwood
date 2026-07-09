@@ -12,10 +12,11 @@ import {
 } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
 import { buildSystemPrompt } from "../prompts/buildSystemPrompt.js";
-import { salesMachine, ALLOWED_TOOLS } from "../machine/salesMachine.js";
+import { salesMachine } from "../machine/salesMachine.js";
 import { filterToolsByAllowed } from "../tools/toolDefinitions.js";
+import { deriveAllowedTools } from "../tools/toolGating.js";
 import { toolHandlers } from "../tools/toolHandlers.js";
-import type { LeadContext } from "../types.js";
+import type { LeadContext, Quote } from "../types.js";
 import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 
 const policy = new PolicyEngine();
@@ -24,18 +25,34 @@ interface ActiveSession {
   sessionId: string;
   lead: LeadContext;
   actor: Actor<typeof salesMachine>;
+  /** Set by the get_quote tool. Drives which closing tools are exposed. */
+  quote: Quote | null;
   openaiWs: WebSocket | null;
   telephonyWs: WebSocket | null;
   streamSid: string | null;
   startedAt: number;
 }
 
+/** Injectable so tests can drive a call without an OpenAI connection. */
+export type OpenAiSocketFactory = (
+  url: string,
+  headers: Record<string, string>
+) => WebSocket;
+
+const defaultOpenAiSocketFactory: OpenAiSocketFactory = (url, headers) =>
+  new WebSocket(url, { headers });
+
 export class RealtimeHandler {
   private sessions = new Map<string, ActiveSession>();
   private bridge: KafkaBridge;
+  private createOpenAiSocket: OpenAiSocketFactory;
 
-  constructor(bridge: KafkaBridge) {
+  constructor(
+    bridge: KafkaBridge,
+    createOpenAiSocket: OpenAiSocketFactory = defaultOpenAiSocketFactory
+  ) {
     this.bridge = bridge;
+    this.createOpenAiSocket = createOpenAiSocket;
   }
 
   async createSession(sessionId: string, lead: LeadContext): Promise<void> {
@@ -47,6 +64,7 @@ export class RealtimeHandler {
       sessionId,
       lead,
       actor,
+      quote: null,
       openaiWs: null,
       telephonyWs: null,
       streamSid: null,
@@ -62,13 +80,9 @@ export class RealtimeHandler {
 
   private async connectOpenAI(session: ActiveSession): Promise<void> {
     const cfg = loadConfig();
-    const ws = new WebSocket(
+    const ws = this.createOpenAiSocket(
       `wss://api.openai.com/v1/realtime?model=${cfg.realtimeModel}`,
-      {
-        headers: {
-          Authorization: `Bearer ${cfg.openaiApiKey}`,
-        },
-      }
+      { Authorization: `Bearer ${cfg.openaiApiKey}` }
     );
 
     session.openaiWs = ws;
@@ -121,8 +135,7 @@ export class RealtimeHandler {
 
   private pushSessionUpdate(session: ActiveSession): void {
     const cfg = loadConfig();
-    const state = session.actor.getSnapshot().value as string;
-    const allowedTools = ALLOWED_TOOLS[state as keyof typeof ALLOWED_TOOLS] ?? [];
+    const allowedTools = deriveAllowedTools(session.lead, session.quote);
     const tools = filterToolsByAllowed(allowedTools).map((t) => ({
       type: "function",
       name: t.name,
@@ -216,10 +229,15 @@ export class RealtimeHandler {
         sessionId: session.sessionId,
         bridge: this.bridge,
         actor: session.actor,
+        session,
       });
       turnLatencyMs.observe(Date.now() - start);
-      this.deliverToolResult(session, callId, result);
+      // Refresh the tool list *before* asking the model to respond. A tool that
+      // just unlocked the next stage (get_quote → book_appointment) must be
+      // callable on this turn, not the one after it: deliverToolResult sends
+      // response.create, which begins generation immediately.
       this.pushSessionUpdate(session);
+      this.deliverToolResult(session, callId, result);
     } catch (err) {
       logger.error({ err, toolName, sessionId: session.sessionId }, "tool handler error");
       this.deliverToolResult(session, callId, { error: String(err) });

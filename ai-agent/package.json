@@ -7,6 +7,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "tsx --test src/tests/*.test.ts",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "prisma:generate": "prisma generate",
