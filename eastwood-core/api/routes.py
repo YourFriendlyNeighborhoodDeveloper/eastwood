@@ -299,26 +299,24 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
     def _source_label(src: str) -> str:
         return "estimate" if src == "formula" else src
 
+    def _option(q) -> dict:
+        # q.labels() carries quote_type / rate_source / carrier_rate / bindable
+        # so a formula premium can never leave core looking like a carrier rate.
+        return {
+            "carrier":         q.carrier,
+            "monthly_premium": q.monthly_premium,
+            "rate_tier":       q.rate_tier,
+            "plan_name":       q.plan_name,
+            "source":          _source_label(q.source),
+            **q.labels(),
+        }
+
     return {
         "quote_source": _source_label(response.source),
         "fetched_at": response.fetched_at,
-        "best": {
-            "carrier":         best.carrier,
-            "monthly_premium": best.monthly_premium,
-            "rate_tier":       best.rate_tier,
-            "plan_name":       best.plan_name,
-            "source":          _source_label(best.source),
-        } if best else None,
-        "all_options": [
-            {
-                "carrier":         q.carrier,
-                "monthly_premium": q.monthly_premium,
-                "rate_tier":       q.rate_tier,
-                "plan_name":       q.plan_name,
-                "source":          _source_label(q.source),
-            }
-            for q in response.quotes
-        ],
+        **response.labels(),
+        "best": _option(best) if best else None,
+        "all_options": [_option(q) for q in response.quotes],
         "errors": response.errors,
     }
 

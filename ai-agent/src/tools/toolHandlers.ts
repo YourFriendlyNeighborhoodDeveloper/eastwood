@@ -9,6 +9,20 @@ import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
 
 const policy = new PolicyEngine();
 
+/**
+ * The only sentence Imogen may use to present a formula estimate.
+ *
+ * It names no carrier, claims no final rate, and routes to a licensed review.
+ * A formula premium is a curve fitted to mid-market benchmarks — no carrier has
+ * quoted it and none is obliged to honour it.
+ */
+export function estimatePresentation(monthlyPremium: number): string {
+  return (
+    `Based on what you told me, we may be looking around $${monthlyPremium.toFixed(2)} per month. ` +
+    `I'd like to book a licensed review to confirm the exact carrier and final rate.`
+  );
+}
+
 type ToolInput = Record<string, unknown>;
 
 export type ToolHandler = (
@@ -61,11 +75,26 @@ export const toolHandlers: Record<string, ToolHandler> = {
     }
 
     const best = quoteData["best"] as Record<string, unknown> | null;
+
+    // Read the honesty labels from core, preferring the top-level values and
+    // falling back to the chosen option. Anything not explicitly "carrier" /
+    // true is treated as an estimate that binds nothing.
+    const label = (key: string): unknown => quoteData[key] ?? best?.[key];
+    const quoteType = label("quote_type") === "carrier" ? "carrier" : "estimated";
+    const isEstimate = quoteType === "estimated";
+    const rateSource = String(label("rate_source") ?? "unknown");
+    const carrierRate = !isEstimate && label("carrier_rate") === true;
+    const bindable = !isEstimate && label("bindable") === true;
+
     const quote = {
       productLine: parsed.productLine as ProductLine,
       monthlyPremium: (best?.["monthly_premium"] as number) ?? 99.0,
       carrier: (best?.["carrier"] as string) ?? "Eastwood Preferred",
       faceValue: parsed.faceValue ?? 10_000,
+      quoteType: quoteType as "estimated" | "carrier",
+      rateSource,
+      carrierRate,
+      bindable,
     };
 
     const policyCheck = policy.evaluateQuote(quote);
@@ -88,14 +117,43 @@ export const toolHandlers: Record<string, ToolHandler> = {
     actor.send({ type: "QUOTE_READY", quote } as Parameters<typeof actor.send>[0]);
     toolInvocations.inc({ tool_name: "get_quote", outcome: "success" });
 
-    const allOptions = (quoteData["all_options"] as unknown[])?.slice(0, 3) ?? [];
-    return {
+    const common = {
       productLine: quote.productLine,
       monthlyPremium: quote.monthlyPremium,
       faceValue: quote.faceValue,
+      quoteType,
+      rateSource,
+      carrierRate,
+      bindable,
+    };
+
+    if (isEstimate) {
+      // The premium is a fitted curve, and no carrier has been selected. The
+      // model is deliberately not given a carrier name it could speak aloud,
+      // and is handed the exact sentence to say.
+      return {
+        ...common,
+        carrier: null,
+        carrierDetermined: false,
+        presentation: estimatePresentation(quote.monthlyPremium),
+        disclosure:
+          "This is an estimate, not a carrier rate. No carrier has been selected " +
+          "and nothing is approved. Say the presentation line as written. Do not " +
+          "name a carrier, and never describe this number as final, locked in, " +
+          "approved, or guaranteed.",
+        nextStep: "book_appointment",
+      };
+    }
+
+    return {
+      ...common,
       carrier: quote.carrier,
-      source: quoteData["quote_source"] ?? "formula",
-      topOptions: allOptions,
+      carrierDetermined: true,
+      topOptions: (quoteData["all_options"] as unknown[])?.slice(0, 3) ?? [],
+      disclosure:
+        "Carrier-published rate. Still subject to underwriting and not bound — " +
+        "the licensed agent confirms it at the appointment.",
+      nextStep: "book_appointment",
     };
   },
 

@@ -50,6 +50,12 @@ export const QuoteSchema = z.object({
   monthlyPremium: z.number().positive(),
   carrier: z.string().optional(),
   termYears: z.number().int().positive().optional(),
+  // Honesty labels from eastwood-core. Defaults are the safe reading: a payload
+  // that omits them is an estimate that binds nothing.
+  quoteType: z.enum(["estimated", "carrier"]).default("estimated"),
+  rateSource: z.string().default("unknown"),
+  carrierRate: z.boolean().default(false),
+  bindable: z.boolean().default(false),
 });
 export type Quote = z.infer<typeof QuoteSchema>;
 

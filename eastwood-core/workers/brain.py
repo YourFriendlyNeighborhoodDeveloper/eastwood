@@ -24,19 +24,37 @@ from sources.proactive import enrich_lead
 logger = logging.getLogger(__name__)
 
 
+def _pick(q: dict, snake: str, camel: str, default=None):
+    """Read a key the agent may have sent in either casing."""
+    if q.get(snake) is not None:
+        return q[snake]
+    if q.get(camel) is not None:
+        return q[camel]
+    return default
+
+
 def _normalize_quote_payload(quote: dict) -> dict:
     """The TypeScript agent emits camelCase quote keys; QuoteRepo reads snake_case.
 
     Without this, quote_records rows persist with NULL premium/face_value.
     The original keys are preserved so quote_data keeps the raw payload.
+
+    quote_type / rate_source / carrier_rate / bindable are persisted alongside
+    the premium so a stored quote can never later be mistaken for a rate a
+    carrier agreed to. A payload that omits them is assumed to be a
+    non-bindable estimate — the safe reading, not the flattering one.
     """
     q = dict(quote or {})
     return {
         **q,
-        "product_line":    q.get("product_line")    or q.get("productLine") or "",
-        "face_value":      q.get("face_value")      if q.get("face_value")      is not None else q.get("faceValue"),
-        "monthly_premium": q.get("monthly_premium") if q.get("monthly_premium") is not None else q.get("monthlyPremium"),
+        "product_line":    _pick(q, "product_line", "productLine", ""),
+        "face_value":      _pick(q, "face_value", "faceValue"),
+        "monthly_premium": _pick(q, "monthly_premium", "monthlyPremium"),
         "carrier":         q.get("carrier"),
+        "quote_type":      _pick(q, "quote_type", "quoteType", "estimated"),
+        "rate_source":     _pick(q, "rate_source", "rateSource", "unknown"),
+        "carrier_rate":    bool(_pick(q, "carrier_rate", "carrierRate", False)),
+        "bindable":        bool(_pick(q, "bindable", "bindable", False)),
     }
 
 

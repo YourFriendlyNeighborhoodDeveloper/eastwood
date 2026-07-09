@@ -91,7 +91,7 @@ async def test_quote_presented_persists_normalized_fields(monkeypatch):
 
 
 async def test_quote_payload_normalization_is_idempotent():
-    """A snake_case payload (e.g. replayed from core) passes through unchanged."""
+    """A fully snake_case payload (e.g. replayed from core) passes through unchanged."""
     from workers.brain import _normalize_quote_payload
 
     snake = {
@@ -99,6 +99,10 @@ async def test_quote_payload_normalization_is_idempotent():
         "monthly_premium": 41.0,
         "face_value": 5_000,
         "carrier": "Transamerica",
+        "quote_type": "estimated",
+        "rate_source": "formula_adapter",
+        "carrier_rate": False,
+        "bindable": False,
     }
     assert _normalize_quote_payload(snake) == snake
 

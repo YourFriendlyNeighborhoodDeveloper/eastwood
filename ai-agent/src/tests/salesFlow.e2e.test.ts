@@ -32,6 +32,7 @@ import type { AcquisitionTask, LeadContext } from "../types.js";
 // observability.ts reads config and constructs its logger at module scope.
 type RealtimeHandlerCtor = typeof import("../realtime/realtimeHandler.js").RealtimeHandler;
 let RealtimeHandler: RealtimeHandlerCtor;
+let estimatePresentation: typeof import("../tools/toolHandlers.js").estimatePresentation;
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,20 @@ class FakeOpenAiSocket extends EventEmitter {
     const latest = updates[updates.length - 1];
     const tools = (latest?.["session"]?.["tools"] ?? []) as Array<{ name: string }>;
     return tools.map((t) => t.name);
+  }
+
+  /** The system prompt currently in force. */
+  currentInstructions(): string {
+    const updates = this.sessionUpdates();
+    const latest = updates[updates.length - 1];
+    return String(latest?.["session"]?.["instructions"] ?? "");
+  }
+
+  /** The payload the most recent tool handed back to the model. */
+  lastToolResult(): Record<string, any> {
+    const items = this.sent.filter((m) => m["type"] === "conversation.item.create");
+    const last = items[items.length - 1];
+    return JSON.parse(last!["item"]["output"]);
   }
 
   /** Simulate the model emitting a completed function call. */
@@ -112,13 +127,41 @@ const CANCER_FOLLOWUPS: AcquisitionTask[] = [
   { field: "followup_treatment_end_date", priority: 11, question: "When did treatment end?", captureKey: "treatment_end_date" },
 ];
 
+/** How POST /api/quote should label its response. */
+type QuoteMode = "estimated" | "carrier" | "unlabelled";
+
 interface FetchStub {
   calls: string[];
   /** Force POST /api/appointments to fail, simulating core being down. */
   failAppointments: boolean;
+  quoteMode: QuoteMode;
   countCalls(suffix: string): number;
   reset(): void;
   restore(): void;
+}
+
+const PREMIUM = 52.3; // $5.23 per $1k on $10k face — inside the policy sanity band
+
+/** Mirrors the /api/quote payload eastwood-core returns for each rate source. */
+function quotePayload(mode: QuoteMode): Record<string, unknown> {
+  const option = { carrier: "Mutual of Omaha", monthly_premium: PREMIUM, rate_tier: "level", plan_name: null };
+  if (mode === "unlabelled") {
+    // A core that predates the honesty labels, or a future one that forgets them.
+    return { quote_source: "estimate", best: { ...option, source: "estimate" }, all_options: [{ ...option, source: "estimate" }], errors: [] };
+  }
+  const labels =
+    mode === "carrier"
+      ? { quote_type: "carrier", rate_source: "rate_table", carrier_rate: true, bindable: false }
+      : { quote_type: "estimated", rate_source: "formula_adapter", carrier_rate: false, bindable: false };
+
+  return {
+    quote_source: mode === "carrier" ? "rate_table" : "estimate",
+    fetched_at: new Date().toISOString(),
+    ...labels,
+    best: { ...option, source: mode === "carrier" ? "rate_table" : "estimate", ...labels },
+    all_options: [{ ...option, source: mode === "carrier" ? "rate_table" : "estimate", ...labels }],
+    errors: [],
+  };
 }
 
 /** Stubs the three eastwood-core endpoints the tools call. */
@@ -127,10 +170,12 @@ function installFetchStub(): FetchStub {
   const stub: FetchStub = {
     calls: [],
     failAppointments: false,
+    quoteMode: "estimated",
     countCalls: (suffix) => stub.calls.filter((u) => u.endsWith(suffix)).length,
     reset: () => {
       stub.calls.length = 0;
       stub.failAppointments = false;
+      stub.quoteMode = "estimated";
     },
     restore: () => {
       globalThis.fetch = original;
@@ -149,14 +194,7 @@ function installFetchStub(): FetchStub {
     });
 
     if (url.endsWith("/api/quote")) {
-      return ok({
-        quote_source: "estimate",
-        fetched_at: new Date().toISOString(),
-        // $52.30/mo on $10k face = $5.23 per $1k — inside the policy sanity band.
-        best: { carrier: "Mutual of Omaha", monthly_premium: 52.3, rate_tier: "level", plan_name: null, source: "estimate" },
-        all_options: [{ carrier: "Mutual of Omaha", monthly_premium: 52.3, rate_tier: "level", plan_name: null, source: "estimate" }],
-        errors: [],
-      });
+      return ok(quotePayload(stub.quoteMode));
     }
     if (url.endsWith("/api/agenda/followups")) {
       return ok({ condition: body.condition, questions: CANCER_FOLLOWUPS });
@@ -206,6 +244,15 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 2000
   }
 }
 
+/** Work the whole Tier-1 agenda so get_quote unlocks. */
+async function completeDiscovery(socket: FakeOpenAiSocket): Promise<void> {
+  for (const task of tier1Plan()) {
+    await callTool(socket, "update_lead_field", { field: task.field, captureKey: task.captureKey, value: "none" });
+  }
+}
+
+const QUOTE_ARGS = { productLine: "final_expense", age: 68, state: "MI", faceValue: 10_000, tobaccoUser: false };
+
 /** Fire a tool call and wait for the handler to finish (a fresh session.update lands). */
 async function callTool(socket: FakeOpenAiSocket, name: string, args: Record<string, unknown>): Promise<void> {
   const before = socket.sessionUpdates().length;
@@ -245,6 +292,7 @@ describe("sales flow end-to-end", () => {
 
   before(async () => {
     ({ RealtimeHandler } = await import("../realtime/realtimeHandler.js"));
+    ({ estimatePresentation } = await import("../tools/toolHandlers.js"));
     fetchStub = installFetchStub();
   });
   beforeEach(() => { fetchStub.reset(); });
@@ -342,6 +390,83 @@ describe("sales flow end-to-end", () => {
 
     assert.ok(bridge.find("quote_presented"), "quote must still be reachable after Tier-2");
     assert.ok(socket.currentTools().includes("transfer_live"), "hot transfer available once quoted");
+  });
+
+  it("presents a formula quote as a non-binding estimate, never as a carrier rate", async () => {
+    const { socket, bridge } = await startCall(); // quoteMode defaults to "estimated"
+    await completeDiscovery(socket);
+    await callTool(socket, "get_quote", QUOTE_ARGS);
+
+    const result = socket.lastToolResult();
+
+    assert.equal(result.quoteType, "estimated");
+    assert.equal(result.rateSource, "formula_adapter");
+    assert.equal(result.carrierRate, false);
+    assert.equal(result.bindable, false);
+
+    // No carrier is handed to the model, so no carrier can be spoken.
+    assert.equal(result.carrier, null, "an estimate names no carrier");
+    assert.equal(result.carrierDetermined, false);
+    assert.equal(result.topOptions, undefined, "an estimate must not enumerate carriers");
+
+    // The exact sentence, and nothing asserting finality.
+    assert.equal(result.presentation, estimatePresentation(PREMIUM));
+    assert.match(result.presentation, /we may be looking around \$52\.30 per month/);
+    assert.match(result.presentation, /confirm the exact carrier and final rate/);
+    assert.ok(!result.presentation.includes("Mutual of Omaha"), "must not name a carrier");
+    for (const claim of [/guaranteed/i, /locked in/i, /\bapproved\b/i, /\bsecured\b/i, /your rate is/i, /rate is \$/i]) {
+      assert.doesNotMatch(result.presentation, claim, `presentation must not claim ${claim}`);
+    }
+
+    // The event still carries the labels and the internal carrier, for the record.
+    const ev = bridge.find("quote_presented")!;
+    assert.equal(ev["quote"].quoteType, "estimated");
+    assert.equal(ev["quote"].rateSource, "formula_adapter");
+    assert.equal(ev["quote"].carrierRate, false);
+    assert.equal(ev["quote"].bindable, false);
+    assert.equal(ev["quote"].carrier, "Mutual of Omaha");
+
+    // And the rail actually reaches the model.
+    const instructions = socket.currentInstructions();
+    assert.match(instructions, /PRESENTING A QUOTE/);
+    assert.match(instructions, /Never call the number final, locked in, approved/);
+  });
+
+  it("lets a carrier-sourced quote name its carrier, but still never calls it bindable", async () => {
+    const { socket, bridge } = await startCall();
+    fetchStub.quoteMode = "carrier";
+    await completeDiscovery(socket);
+    await callTool(socket, "get_quote", QUOTE_ARGS);
+
+    const result = socket.lastToolResult();
+
+    assert.equal(result.quoteType, "carrier");
+    assert.equal(result.rateSource, "rate_table");
+    assert.equal(result.carrierRate, true);
+    assert.equal(result.bindable, false, "nothing Eastwood quotes is bindable");
+    assert.equal(result.carrier, "Mutual of Omaha");
+    assert.equal(result.carrierDetermined, true);
+    assert.equal(result.presentation, undefined, "the estimate script is for estimates only");
+    assert.match(result.disclosure, /subject to underwriting and not bound/);
+
+    assert.equal(bridge.find("quote_presented")!["quote"].quoteType, "carrier");
+  });
+
+  it("treats an unlabelled quote response as an estimate", async () => {
+    const { socket } = await startCall();
+    fetchStub.quoteMode = "unlabelled";
+    await completeDiscovery(socket);
+    await callTool(socket, "get_quote", QUOTE_ARGS);
+
+    const result = socket.lastToolResult();
+
+    // A core that forgets the labels must not be read as quoting a carrier rate.
+    assert.equal(result.quoteType, "estimated");
+    assert.equal(result.rateSource, "unknown");
+    assert.equal(result.carrierRate, false);
+    assert.equal(result.bindable, false);
+    assert.equal(result.carrier, null);
+    assert.equal(result.presentation, estimatePresentation(PREMIUM));
   });
 
   it("does not claim a booking when eastwood-core rejects the write", async () => {
