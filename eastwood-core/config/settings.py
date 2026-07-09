@@ -80,6 +80,28 @@ class Settings(BaseSettings):
     def active_states_list(self) -> list[str]:
         return [s.strip().upper() for s in self.active_states.split(",") if s.strip()]
 
+    def consumed_topics(self) -> list[str]:
+        """Every topic eastwood-core subscribes to.
+
+        Must cover every topic the ai-agent publishes to (see kafkaBridge.ts
+        topicForEvent), or those events are produced and silently dropped.
+        """
+        return [
+            self.topic_leads_raw,
+            self.topic_leads_normalized,
+            # legacy catch-all (kept while traffic migrates to discrete topics)
+            self.topic_agent_events,
+            # discrete call-event topics
+            self.topic_calls_quote_requested,
+            self.topic_calls_quote_presented,
+            self.topic_calls_field_captured,
+            self.topic_calls_objection_captured,
+            self.topic_calls_consent_captured,
+            self.topic_calls_dnc_requested,
+            self.topic_calls_live_transfer_requested,
+            self.topic_calls_ended,
+        ]
+
     @field_validator("score_hot_threshold", "score_warm_threshold")
     @classmethod
     def thresholds_in_range(cls, v: int) -> int:

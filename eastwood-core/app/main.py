@@ -133,20 +133,7 @@ async def lifespan(app: FastAPI):
 
     consumer = KafkaConsumer(
         group_id="eastwood-core",
-        topics=[
-            settings.topic_leads_raw,
-            settings.topic_leads_normalized,
-            # legacy catch-all (kept while traffic migrates to discrete topics)
-            settings.topic_agent_events,
-            # discrete call-event topics
-            settings.topic_calls_quote_requested,
-            settings.topic_calls_field_captured,
-            settings.topic_calls_objection_captured,
-            settings.topic_calls_consent_captured,
-            settings.topic_calls_dnc_requested,
-            settings.topic_calls_live_transfer_requested,
-            settings.topic_calls_ended,
-        ],
+        topics=settings.consumed_topics(),
     )
 
     @consumer.on(settings.topic_leads_raw)
@@ -164,6 +151,10 @@ async def lifespan(app: FastAPI):
     @consumer.on(settings.topic_calls_quote_requested)
     async def handle_quote_requested(msg: dict):
         await brain.on_quote_requested(msg)
+
+    @consumer.on(settings.topic_calls_quote_presented)
+    async def handle_quote_presented(msg: dict):
+        await brain.on_agent_event({**msg, "eventType": "quote_presented"})
 
     @consumer.on(settings.topic_calls_field_captured)
     async def handle_field_captured(msg: dict):

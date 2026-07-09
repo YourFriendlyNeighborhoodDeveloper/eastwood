@@ -24,6 +24,22 @@ from sources.proactive import enrich_lead
 logger = logging.getLogger(__name__)
 
 
+def _normalize_quote_payload(quote: dict) -> dict:
+    """The TypeScript agent emits camelCase quote keys; QuoteRepo reads snake_case.
+
+    Without this, quote_records rows persist with NULL premium/face_value.
+    The original keys are preserved so quote_data keeps the raw payload.
+    """
+    q = dict(quote or {})
+    return {
+        **q,
+        "product_line":    q.get("product_line")    or q.get("productLine") or "",
+        "face_value":      q.get("face_value")      if q.get("face_value")      is not None else q.get("faceValue"),
+        "monthly_premium": q.get("monthly_premium") if q.get("monthly_premium") is not None else q.get("monthlyPremium"),
+        "carrier":         q.get("carrier"),
+    }
+
+
 class WorkersBrain:
     def __init__(self) -> None:
         self._settings = get_settings()
@@ -234,7 +250,10 @@ class WorkersBrain:
         async with session_scope() as session:
             if event_type == "quote_presented":
                 quote_repo = QuoteRepo(session)
-                await quote_repo.create(lead_id, session_id or "", msg.get("quote", {}))
+                await quote_repo.create(
+                    lead_id, session_id or "", _normalize_quote_payload(msg.get("quote", {}))
+                )
+                logger.info("quote persisted for lead %s session=%s", lead_id, session_id)
 
             elif event_type == "objection_captured":
                 objection_repo = ObjectionRepo(session)
