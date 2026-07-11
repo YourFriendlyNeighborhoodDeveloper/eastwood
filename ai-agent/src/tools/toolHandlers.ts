@@ -6,6 +6,7 @@ import { logger, toolInvocations } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
 import type { AcquisitionTask, LeadContext, ProductLine, SessionState } from "../types.js";
 import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
+import { buildProspectProfile, selectFaceAmount } from "../discovery/prospectProfile.js";
 
 const policy = new PolicyEngine();
 
@@ -50,6 +51,21 @@ export const toolHandlers: Record<string, ToolHandler> = {
       .parse(input);
 
     const cfg = loadConfig();
+
+    // The model does not choose the face amount; it is derived from what the
+    // prospect actually stated (requested amount, or a budget-fit sizing).
+    const age = lead.age ?? parsed.age;
+    const { faceValue, reason: faceAmountReason } = selectFaceAmount(session, age);
+    if (faceAmountReason === "agent_default" && cfg.appEnv === "production") {
+      toolInvocations.inc({ tool_name: "get_quote", outcome: "no_basis" });
+      return {
+        error:
+          "I can get you a real number, but I need to make sure I'm pricing the " +
+          "right amount for the right purpose first — can we sort out roughly how " +
+          "much coverage you're after, or a monthly budget?",
+      };
+    }
+
     let quoteData: Record<string, unknown>;
     try {
       const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/quote`, {
@@ -59,7 +75,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
           product_line: parsed.productLine,
           age: parsed.age,
           state: parsed.state,
-          face_value: parsed.faceValue ?? 10_000,
+          face_value: faceValue,
           tobacco: parsed.tobaccoUser ?? false,
           gender: parsed.gender ?? null,
           lead_id: lead.leadId,
@@ -90,11 +106,12 @@ export const toolHandlers: Record<string, ToolHandler> = {
       productLine: parsed.productLine as ProductLine,
       monthlyPremium: (best?.["monthly_premium"] as number) ?? 99.0,
       carrier: (best?.["carrier"] as string) ?? "Eastwood Preferred",
-      faceValue: parsed.faceValue ?? 10_000,
+      faceValue,
       quoteType: quoteType as "estimated" | "carrier",
       rateSource,
       carrierRate,
       bindable,
+      faceAmountReason,
     };
 
     const policyCheck = policy.evaluateQuote(quote);
@@ -121,6 +138,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
       productLine: quote.productLine,
       monthlyPremium: quote.monthlyPremium,
       faceValue: quote.faceValue,
+      faceAmountReason,
       quoteType,
       rateSource,
       carrierRate,
@@ -162,16 +180,39 @@ export const toolHandlers: Record<string, ToolHandler> = {
       .object({
         preferredDate: z.string(),
         preferredTime: z.string(),
+        timezone: z.string().optional(),
         notes: z.string().optional(),
       })
       .parse(input);
 
+    // Idempotent: a repeated call returns the existing booking without a second
+    // POST, so eastwood-core writes one appointment and sends Ryan one brief.
+    if (session.appointment) {
+      toolInvocations.inc({ tool_name: "book_appointment", outcome: "duplicate" });
+      return {
+        booked: true,
+        appointmentId: session.appointment.appointmentId,
+        date: session.appointment.date,
+        time: session.appointment.time,
+        message: "That appointment is already on the calendar.",
+      };
+    }
+
     const cfg = loadConfig();
 
+    // Assemble the handoff profile from captured facts before we write, so a
+    // successful appointment carries Ryan's brief. Never model-authored.
+    const appointmentTime = [parsed.preferredDate, parsed.preferredTime, parsed.timezone]
+      .filter(Boolean)
+      .join(" ");
+    const profile = buildProspectProfile(session, {
+      appointmentTime,
+      followUpNotes: parsed.notes,
+    });
+
     // eastwood-core is the single source of truth: POST /api/appointments writes
-    // the row and publishes appointment_booked itself. The agent must NOT also
-    // publish that event — two publishers meant two confirmation SMS and a
-    // doubled dial-queue cancel.
+    // the row, persists the profile, and sends Ryan the brief. The agent must
+    // NOT publish appointment_booked itself.
     let appointmentId: string;
     try {
       const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/appointments`, {
@@ -182,7 +223,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
           session_id: sessionId,
           preferred_date: parsed.preferredDate,
           preferred_time: parsed.preferredTime,
+          timezone: parsed.timezone,
           notes: parsed.notes,
+          prospect_profile: profile,
         }),
       });
       if (!resp.ok) throw new Error(`appointments API ${resp.status}`);
@@ -199,6 +242,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     }
 
     session.appointmentBooked = true;
+    session.appointment = { appointmentId, date: parsed.preferredDate, time: parsed.preferredTime };
     actor.send({ type: "WRAP_UP" });
     toolInvocations.inc({ tool_name: "book_appointment", outcome: "success" });
 
@@ -246,7 +290,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
-  capture_objection: async (input, { lead, sessionId, bridge, actor }) => {
+  capture_objection: async (input, { lead, sessionId, bridge, actor, session }) => {
     const parsed = z
       .object({ objectionType: z.string(), text: z.string() })
       .parse(input);
@@ -258,6 +302,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
       objectionType: parsed.objectionType,
       text: parsed.text,
     });
+
+    // Retained for the handoff brief, so Ryan knows what to address.
+    session.objections.push({ objectionType: parsed.objectionType, text: parsed.text });
 
     actor.send({ type: "OBJECTION" });
     toolInvocations.inc({ tool_name: "capture_objection", outcome: "success" });
@@ -393,7 +440,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     return { ended: true, outcome };
   },
 
-  update_lead_field: async (input, { lead, sessionId, bridge }) => {
+  update_lead_field: async (input, { lead, sessionId, bridge, session }) => {
     const parsed = z
       .object({
         field: z.string(),
@@ -411,6 +458,10 @@ export const toolHandlers: Record<string, ToolHandler> = {
       captureKey: parsed.captureKey,
       value: parsed.value,
     });
+
+    // Retain the captured value on the session — this is what the quote gate and
+    // the handoff profile read. Without it the profile could only be invented.
+    session.captured[parsed.captureKey] = parsed.value;
 
     // Remove from the local acquisition plan so pushSessionUpdate reflects progress
     if (lead.acquisitionPlan) {

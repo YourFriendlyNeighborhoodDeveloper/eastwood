@@ -1,4 +1,5 @@
 import type { AcquisitionTask, LeadContext, SessionState } from "../types.js";
+import { quoteUnlocked, tier1HealthComplete } from "../discovery/prospectProfile.js";
 
 /**
  * Derives which tools the model may call, from what we actually know about the
@@ -31,16 +32,6 @@ export function isFollowupTask(task: AcquisitionTask): boolean {
   return task.field.startsWith(FOLLOWUP_FIELD_PREFIX);
 }
 
-/** Tier-1 screening tasks still outstanding: age, tobacco, conditions, meds, height/weight. */
-export function outstandingTier1(lead: LeadContext): AcquisitionTask[] {
-  return (lead.acquisitionPlan ?? []).filter((task) => !isFollowupTask(task));
-}
-
-/** True once every Tier-1 screening question has been captured. */
-export function discoveryComplete(lead: LeadContext): boolean {
-  return outstandingTier1(lead).length === 0;
-}
-
 export function deriveAllowedTools(
   lead: LeadContext,
   session: SessionState
@@ -58,16 +49,24 @@ export function deriveAllowedTools(
 
   const allowed = new Set<string>(ALWAYS_ALLOWED);
 
-  // Anything still on the agenda needs a way to be recorded — Tier-1 screening,
-  // or a Tier-2 follow-up that add_followup_questions just appended.
-  if ((lead.acquisitionPlan?.length ?? 0) > 0) {
+  // Recording captured answers stays available through the whole
+  // discovery/selling phase: before a quote there is always more to learn
+  // (needs discovery, health), and after a quote optional agenda items may
+  // remain. Only once a quote exists and the agenda is empty does it drop off.
+  if (session.quote === null || (lead.acquisitionPlan?.length ?? 0) > 0) {
     allowed.add("update_lead_field");
   }
 
-  if (discoveryComplete(lead)) {
-    // Follow-ups stay available so a condition confirmed late in the call can
-    // still pull its Tier-2 questions onto the agenda.
+  // Follow-ups become available once health screening is done, so a condition
+  // confirmed late in the call can still pull its Tier-2 questions onto the agenda.
+  if (tier1HealthComplete(lead)) {
     allowed.add("add_followup_questions");
+  }
+
+  // A quote requires the minimum needs-discovery profile (purpose, beneficiary,
+  // and an amount or budget) on top of completed health screening — so Imogen
+  // cannot price before she knows what she is pricing, or for whom.
+  if (quoteUnlocked(lead, session)) {
     allowed.add("get_quote");
   }
 

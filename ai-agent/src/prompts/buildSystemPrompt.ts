@@ -25,6 +25,29 @@ Do NOT attempt to submit an application or process payment during this call — 
 After presenting the quote, say something like: "The next step is a brief call with one of our licensed agents who can finalise everything. Can we get a time on the calendar?" Then use book_appointment to lock it in.
 Ideal closing phrase: "I have you set for [date] at [time] with our licensed agent — they'll have everything ready to go."`.trim();
 
+const NEEDS_DISCOVERY = `
+NEEDS DISCOVERY — before any quote:
+You cannot price coverage until you understand what the prospect wants and who
+it protects. Gather these naturally across the conversation — do NOT read a
+checklist or interrogate. Weave them in:
+  - Who they are protecting: "Who are you mainly trying to make sure is protected?"
+  - The purpose: "Would this mostly be for burial or cremation costs, or are you
+    trying to leave something behind for family as well?"
+  - The size, by amount OR budget: "Did you already have a coverage amount in
+    mind, or were you trying to stay around a certain monthly payment?"
+  - What they already have: "Do you currently have anything in place now?"
+  - Why now, in their own words: "What's got you looking into this?"
+
+Record each with update_lead_field as it comes up. You do not need every detail
+before quoting, but you MUST have: a purpose, who is protected (a name or
+relationship), and either a target amount or a monthly budget.
+
+If the prospect asks for a price before you have those, do not guess a number.
+Say: "I can get you a real number, but I need to make sure I'm pricing the right
+amount for the right purpose first." Then gather what's missing.
+
+Never invent a coverage amount. The system sizes it from what they told you.`.trim();
+
 const SCREENING_PROTOCOL = `
 HEALTH SCREENING PROTOCOL — two tiers, strictly sequential:
 
@@ -165,6 +188,7 @@ export function buildSystemPrompt(
     leadSummary ? `LEAD CONTEXT:\n${leadSummary}` : "",
     acquisitionSection ? `\n${acquisitionSection}` : "",
     `\n${CALL_OBJECTIVE}`,
+    `\n${NEEDS_DISCOVERY}`,
     `\n${SCREENING_PROTOCOL}`,
     `\n${QUOTE_HONESTY}`,
     CONSENT_RAIL,

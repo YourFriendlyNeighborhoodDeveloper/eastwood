@@ -32,6 +32,10 @@ interface ActiveSession {
   /** Set by the get_quote tool. Drives which closing tools are exposed. */
   quote: Quote | null;
   appointmentBooked: boolean;
+  /** Captured field values (captureKey → value), source of the handoff profile. */
+  captured: Record<string, unknown>;
+  objections: Array<{ objectionType: string; text: string }>;
+  appointment: { appointmentId: string; date: string; time: string } | null;
   dncCaptured: boolean;
   callEndedPublished: boolean;
   /** True once Twilio bound the media stream — i.e. the call reached a person. */
@@ -78,6 +82,9 @@ export class RealtimeHandler {
       actor,
       quote: null,
       appointmentBooked: false,
+      captured: {},
+      objections: [],
+      appointment: null,
       dncCaptured: false,
       callEndedPublished: false,
       telephonyBound: false,

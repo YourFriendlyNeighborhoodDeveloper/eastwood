@@ -34,13 +34,17 @@ export const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: "book_appointment",
-    description: "Book a follow-up appointment for the prospect.",
+    description:
+      "Book the licensed-agent appointment for the prospect. Only after a quote " +
+      "has been presented. notes carries anything the prospect asked the agent to " +
+      "know before the call.",
     parameters: {
       type: "object",
       required: ["preferredDate", "preferredTime"],
       properties: {
         preferredDate: { type: "string", format: "date" },
         preferredTime: { type: "string" },
+        timezone: { type: "string", description: "Prospect's timezone, e.g. 'ET', 'America/Detroit'" },
         notes: { type: "string" },
       },
     },

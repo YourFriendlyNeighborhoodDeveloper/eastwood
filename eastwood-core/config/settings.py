@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     # Set RYAN_PHONE_NUMBER=+1XXXXXXXXXX to enable.
     ryan_phone_number: str = ""
 
+    # Appointment handoff: where the licensed agent receives the prospect brief
+    # when an appointment books. If unset, booking still succeeds — the brief is
+    # skipped with a warning, and the full profile remains retrievable from the DB.
+    agent_notification_phone_e164: str = ""
+
     # Autonomous dialer controls
     max_concurrent_calls: int = 3        # hard cap on simultaneous outbound calls
     dial_max_attempts: int = 5           # total attempts per lead before giving up

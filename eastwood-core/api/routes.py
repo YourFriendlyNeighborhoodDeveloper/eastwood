@@ -327,11 +327,12 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
 async def create_appointment(request: Request, session: AsyncSession = Depends(get_session)):
     """
     Create an appointment from a date/time preference expressed by the AI agent.
-    Stores in the appointments table and fires the appointment_booked Kafka event (→ SMS).
+    Persists the appointment, the handoff ProspectProfile, and — only after the
+    write succeeds — sends the licensed agent an immediate brief SMS.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta, timezone
-    from db.models import Appointment as _ApptModel, BookingSlot as _SlotModel
+    from db.models import Appointment as _ApptModel, BookingSlot as _SlotModel, HandoffProfile as _ProfileModel
 
     body: dict = await request.json()
     settings = get_settings()
@@ -341,6 +342,7 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
     preferred_date = body.get("preferred_date")
     preferred_time = body.get("preferred_time", "10:00")
     notes = body.get("notes")
+    prospect_profile = body.get("prospect_profile")
 
     if not lead_id_str or not preferred_date:
         raise HTTPException(status_code=422, detail="lead_id and preferred_date are required")
@@ -370,6 +372,21 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
     )
     session.add(appointment)
     await session.flush()
+
+    # Persist the full profile as the canonical handoff record, in the same
+    # transaction as the appointment — the SMS is just the alert.
+    if prospect_profile:
+        session.add(_ProfileModel(
+            lead_id=_uuid.UUID(lead_id_str),
+            appointment_id=appointment.id,
+            tenant_id=settings.default_tenant_id,
+            session_id=session_id,
+            profile=prospect_profile,
+        ))
+        await session.flush()
+
+    # If this raises, we never reach the notify step below — no success alert
+    # is sent for a booking that did not persist.
     await session.commit()
 
     await publish(
@@ -383,12 +400,31 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
         key=lead_id_str,
     )
 
+    # Only after the write succeeds. Fail-soft: a missing destination or SMS error
+    # never turns a real booking into a failure for the prospect.
+    if prospect_profile:
+        try:
+            _make_appointment_notifier(settings).send_agent_brief(
+                prospect_profile, appointment_id=str(appointment.id)
+            )
+        except Exception:
+            logger.exception("agent brief send failed for appointment %s", appointment.id)
+
     return {
         "appointment_id": str(appointment.id),
         "booked_at": starts_at.isoformat(),
         "date": preferred_date,
         "time": preferred_time,
     }
+
+
+def _make_appointment_notifier(settings):
+    """Build the handoff notifier from settings. Factored out so it is injectable."""
+    from clients.twilio_sms import SmsClient
+    from domain.notifications import AppointmentNotificationService
+
+    sms = SmsClient() if settings.twilio_account_sid else None
+    return AppointmentNotificationService(sms, settings.agent_notification_phone_e164)
 
 
 # ── Acquisition agenda ────────────────────────────────────────────────────────

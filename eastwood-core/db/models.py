@@ -309,6 +309,22 @@ class CarrierRateTable(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class HandoffProfile(Base):
+    """The full prospect brief assembled at booking, so the licensed agent can
+    retrieve it later even if the alert SMS was truncated. SMS is the alert; this
+    is the canonical store."""
+    __tablename__ = "handoff_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    lead_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True)
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(64))
+    profile: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    agent_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class LeadFieldEvent(Base):
     """Immutable mutation log for every field captured on a lead — audit trail."""
     __tablename__ = "lead_field_events"

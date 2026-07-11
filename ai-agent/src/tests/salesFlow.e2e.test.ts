@@ -244,14 +244,21 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 2000
   }
 }
 
-/** Work the whole Tier-1 agenda so get_quote unlocks. */
+/** Capture the minimum needs-discovery profile plus Tier-1 health so get_quote unlocks. */
 async function completeDiscovery(socket: FakeOpenAiSocket): Promise<void> {
-  for (const task of tier1Plan()) {
-    await callTool(socket, "update_lead_field", { field: task.field, captureKey: task.captureKey, value: "none" });
-  }
+  // Needs discovery: purpose, beneficiary, and a requested amount.
+  await callTool(socket, "update_lead_field", { field: "coverage_purpose", captureKey: "coverage_purpose", value: "burial" });
+  await callTool(socket, "update_lead_field", { field: "beneficiary", captureKey: "beneficiary_relationship", value: "spouse" });
+  await callTool(socket, "update_lead_field", { field: "coverage_target", captureKey: "desired_coverage_amount", value: 10_000 });
+  // Tier-1 health (empties the agenda).
+  await callTool(socket, "update_lead_field", { field: "age", captureKey: "age", value: 68 });
+  await callTool(socket, "update_lead_field", { field: "tobacco", captureKey: "tobacco", value: "none" });
+  await callTool(socket, "update_lead_field", { field: "health_screening", captureKey: "conditions", value: "none" });
+  await callTool(socket, "update_lead_field", { field: "medications", captureKey: "current_meds", value: "none" });
+  await callTool(socket, "update_lead_field", { field: "height_weight", captureKey: "height_weight", value: "5'8\" 180 lbs" });
 }
 
-const QUOTE_ARGS = { productLine: "final_expense", age: 68, state: "MI", faceValue: 10_000, tobaccoUser: false };
+const QUOTE_ARGS = { productLine: "final_expense", age: 68, state: "MI", tobaccoUser: false };
 
 /** Fire a tool call and wait for the handler to finish (a fresh session.update lands). */
 async function callTool(socket: FakeOpenAiSocket, name: string, args: Record<string, unknown>): Promise<void> {
@@ -309,25 +316,30 @@ describe("sales flow end-to-end", () => {
     assert.ok(!tools.includes("get_quote"), "no quoting before discovery is complete");
     assert.ok(!tools.includes("book_appointment"), "no booking before a quote exists");
 
-    // ── discovery: work the Tier-1 agenda ─────────────────────────────────
+    // ── needs discovery + Tier-1 health ───────────────────────────────────
+    await callTool(socket, "update_lead_field", { field: "coverage_purpose", captureKey: "coverage_purpose", value: "burial" });
+    await callTool(socket, "update_lead_field", { field: "beneficiary", captureKey: "beneficiary_relationship", value: "spouse" });
     await callTool(socket, "update_lead_field", { field: "age", captureKey: "age", value: 68 });
     await callTool(socket, "update_lead_field", { field: "tobacco", captureKey: "tobacco", value: "none" });
     await callTool(socket, "update_lead_field", { field: "health_screening", captureKey: "conditions", value: "none" });
     await callTool(socket, "update_lead_field", { field: "medications", captureKey: "current_meds", value: "none" });
-
-    assert.ok(!socket.currentTools().includes("get_quote"), "still one Tier-1 field outstanding");
-
     await callTool(socket, "update_lead_field", { field: "height_weight", captureKey: "height_weight", value: "5'8\" 180 lbs" });
 
-    // ── discovery complete: quoting unlocks ───────────────────────────────
+    // Health screening is done and follow-ups are available, but no coverage
+    // amount or budget yet — so quoting stays locked.
     tools = socket.currentTools();
-    assert.ok(tools.includes("get_quote"), "Tier-1 complete must unlock get_quote");
     assert.ok(tools.includes("add_followup_questions"), "late condition disclosure must still be capturable");
-    assert.ok(!tools.includes("update_lead_field"), "agenda is empty, nothing left to record");
+    assert.ok(!tools.includes("get_quote"), "no quote without an amount or budget");
+
+    await callTool(socket, "update_lead_field", { field: "coverage_target", captureKey: "desired_coverage_amount", value: 10_000 });
+
+    // ── minimum discovery complete: quoting unlocks ───────────────────────
+    tools = socket.currentTools();
+    assert.ok(tools.includes("get_quote"), "purpose + beneficiary + amount unlocks get_quote");
     assert.ok(!tools.includes("book_appointment"), "no booking until a quote exists");
 
     // ── quote ─────────────────────────────────────────────────────────────
-    await callTool(socket, "get_quote", { productLine: "final_expense", age: 68, state: "MI", faceValue: 10_000, tobaccoUser: false });
+    await callTool(socket, "get_quote", QUOTE_ARGS);
 
     const quoteEvent = bridge.find("quote_presented");
     assert.ok(quoteEvent, "quote_presented must be published");
@@ -359,7 +371,9 @@ describe("sales flow end-to-end", () => {
     assert.equal(ended["outcome"], "appointment_set");
 
     assert.deepEqual(bridge.eventTypes(), [
-      "field_captured", "field_captured", "field_captured", "field_captured", "field_captured",
+      // 8 captures: purpose, beneficiary, age, tobacco, conditions, meds, height, amount
+      "field_captured", "field_captured", "field_captured", "field_captured",
+      "field_captured", "field_captured", "field_captured", "field_captured",
       "quote_presented",
       "call_ended",
     ]);
@@ -371,6 +385,11 @@ describe("sales flow end-to-end", () => {
 
   it("reopens field capture when a confirmed condition pulls Tier-2 follow-ups onto the agenda", async () => {
     const { socket, bridge } = await startCall();
+
+    // Minimum needs discovery so a quote can unlock.
+    await callTool(socket, "update_lead_field", { field: "coverage_purpose", captureKey: "coverage_purpose", value: "burial" });
+    await callTool(socket, "update_lead_field", { field: "beneficiary", captureKey: "beneficiary_relationship", value: "daughter" });
+    await callTool(socket, "update_lead_field", { field: "coverage_target", captureKey: "desired_coverage_amount", value: 15_000 });
 
     await callTool(socket, "update_lead_field", { field: "age", captureKey: "age", value: 71 });
     await callTool(socket, "update_lead_field", { field: "tobacco", captureKey: "tobacco", value: "former" });

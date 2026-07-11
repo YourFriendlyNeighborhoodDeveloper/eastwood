@@ -77,12 +77,69 @@ def build_acquisition_plan(
             value_hint="integer years, or date MM/DD/YYYY",
         ))
 
+    # ── Needs discovery — what they want and who it protects. Gathered naturally,
+    #    never as a checklist. A quote cannot unlock until purpose + a beneficiary
+    #    + (an amount or a budget) are captured (enforced agent-side).
+    if not hd.get("beneficiary_relationship") and not hd.get("beneficiary_name"):
+        tasks.append(AcquisitionTask(
+            field="beneficiary",
+            priority=2,
+            question="Who are you mainly trying to make sure is protected?",
+            capture_key="beneficiary_relationship",
+            value_hint="relationship (spouse, children, ...) or a name",
+        ))
+
+    if not hd.get("coverage_purpose"):
+        tasks.append(AcquisitionTask(
+            field="coverage_purpose",
+            priority=3,
+            question=(
+                "Would this mostly be for burial or cremation costs, or are you "
+                "trying to leave something behind for family as well?"
+            ),
+            capture_key="coverage_purpose",
+            value_hint="burial | cremation | income_replacement | debt_mortgage | family_protection | other",
+        ))
+
+    if not hd.get("desired_coverage_amount") and not hd.get("affordable_monthly_budget"):
+        tasks.append(AcquisitionTask(
+            field="coverage_target",
+            priority=4,
+            question=(
+                "Did you already have a coverage amount in mind, or were you trying "
+                "to stay around a certain monthly payment?"
+            ),
+            capture_key="desired_coverage_amount",
+            value_hint=(
+                "dollar amount → capture as desired_coverage_amount; a monthly figure "
+                "→ capture as affordable_monthly_budget"
+            ),
+        ))
+
+    if not hd.get("existing_coverage"):
+        tasks.append(AcquisitionTask(
+            field="existing_coverage",
+            priority=5,
+            question="Do you currently have any coverage in place now?",
+            capture_key="existing_coverage",
+            value_hint="yes | no | unknown; if yes, also capture existing_coverage_amount",
+        ))
+
+    if not hd.get("reason_for_coverage"):
+        tasks.append(AcquisitionTask(
+            field="motivation",
+            priority=6,
+            question="What's got you looking into this now?",
+            capture_key="reason_for_coverage",
+            value_hint="their reason, in their own words",
+        ))
+
     # 2. Tobacco — affects every rate band
     tobacco = (hd.get("tobacco") or "unknown").lower()
     if tobacco == "unknown":
         tasks.append(AcquisitionTask(
             field="tobacco",
-            priority=2,
+            priority=7,
             question="Have you used any tobacco or nicotine products in the past 12 months?",
             capture_key="tobacco",
             value_hint="none | current | former",
@@ -92,7 +149,7 @@ def build_acquisition_plan(
     if not hd.get("conditions"):
         tasks.append(AcquisitionTask(
             field="health_screening",
-            priority=3,
+            priority=8,
             question=(
                 "Have you been diagnosed with or treated for any of the following in the last 5 years: "
                 "cancer, heart disease or heart attack, diabetes, stroke, COPD, or kidney disease? "
@@ -106,7 +163,7 @@ def build_acquisition_plan(
     if not hd.get("current_meds"):
         tasks.append(AcquisitionTask(
             field="medications",
-            priority=4,
+            priority=9,
             question=(
                 "Are you currently taking any prescription medications? "
                 "If so, which ones?"
@@ -119,7 +176,7 @@ def build_acquisition_plan(
     if not hd.get("height_weight"):
         tasks.append(AcquisitionTask(
             field="height_weight",
-            priority=5,
+            priority=10,
             question="And what's your height and current weight?",
             capture_key="height_weight",
             value_hint="e.g. 5'8\" 180 lbs",

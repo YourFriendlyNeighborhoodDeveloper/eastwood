@@ -7,6 +7,8 @@ const ConfigSchema = z.object({
   eastwoodCoreBaseUrl: z.string().url().default("http://eastwood-core:8080"),
   agentDisplayName: z.string().default("Imogen"),
   agencyName: z.string().default("Eastwood Financial"),
+  // "production" forbids quoting on an agent_default face amount.
+  appEnv: z.string().default("development"),
   port: z.coerce.number().int().positive().default(8081),
   logLevel: z.string().default("info"),
   topicAgentEvents: z.string().default("agent.events"),
@@ -43,6 +45,7 @@ export function loadConfig(): Config {
     eastwoodCoreBaseUrl: process.env["EASTWOOD_CORE_BASE_URL"],
     agentDisplayName: process.env["AGENT_DISPLAY_NAME"],
     agencyName: process.env["AGENCY_NAME"],
+    appEnv: process.env["APP_ENV"],
     port: process.env["PORT"],
     logLevel: process.env["LOG_LEVEL"],
     topicAgentEvents: process.env["TOPIC_AGENT_EVENTS"],
