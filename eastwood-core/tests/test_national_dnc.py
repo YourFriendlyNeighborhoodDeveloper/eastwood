@@ -283,6 +283,13 @@ async def _drain_dial_queue(monkeypatch, status: str) -> tuple[int, list]:
     monkeypatch.setattr(brain, "LeadRepo", _FakeLeadRepo)
     monkeypatch.setattr(brain, "DialQueueRepo", _DialLoopQueueRepo)
     monkeypatch.setattr(tcpa_mod, "in_tcpa_window", lambda *a, **k: True)
+    # process_dial_queue now re-checks entity suppression via SuppressionRepo.
+    import repos.repos as repos_mod
+
+    class _NotSuppressed:
+        def __init__(self, s): pass
+        async def is_suppressed(self, tenant_id, phone): return False
+    monkeypatch.setattr(repos_mod, "SuppressionRepo", _NotSuppressed)
 
     dialed: list = []
     worker = brain.WorkersBrain()

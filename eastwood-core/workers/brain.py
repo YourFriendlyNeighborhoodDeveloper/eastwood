@@ -18,8 +18,9 @@ from domain.tcpa import evaluate_tcpa
 from metrics.metrics import agent_events_received, leads_ingested, leads_routed, worker_processing_seconds
 from repos.repos import CallRepo, CarrierProfileRepo, ConsentRepo, DialQueueRepo, FollowupRepo, LeadFieldEventRepo, LeadRepo, ObjectionRepo, QuoteRepo, RulesetRepo, SuppressionRepo, TriageRepo
 
-# Hours after a no-answer before retrying. Index = attempt_count after the failed call.
-_RETRY_OFFSETS_HOURS = [4, 24, 32, 56, 80]
+# Retry offsets and dial eligibility live in domain.dialing so the Twilio status
+# callback and the dialer share one source of truth.
+from domain.dialing import RETRY_OFFSETS_HOURS as _RETRY_OFFSETS_HOURS, check_dial_eligibility
 from sources.proactive import enrich_lead
 
 logger = logging.getLogger(__name__)
@@ -461,23 +462,10 @@ class WorkersBrain:
                             followup_repo=followup_repo,
                         )
 
-                # Retry logic for no-answer outcomes
-                if outcome in ("no_answer", "voicemail", "busy"):
-                    dq_repo = DialQueueRepo(session)
-                    entry = await dq_repo.get_by_session(session_id or "")
-                    if entry and entry.attempt_count < entry.max_attempts:
-                        offset_hours = _RETRY_OFFSETS_HOURS[
-                            min(entry.attempt_count, len(_RETRY_OFFSETS_HOURS) - 1)
-                        ]
-                        retry_at = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
-                        await dq_repo.reschedule(entry.id, retry_at, entry.attempt_count + 1)
-                        logger.info(
-                            "lead %s rescheduled (attempt %d/%d) at %s",
-                            lead_id, entry.attempt_count + 1, entry.max_attempts, retry_at.isoformat(),
-                        )
-                    elif entry:
-                        await dq_repo.mark_no_answer(entry.id)
-                        logger.info("lead %s exhausted %d attempts — no_contact sequence pending", lead_id, entry.max_attempts)
+                # Dial retries for unanswered calls are owned by the Twilio status
+                # callback (domain.dialing.handle_terminal_status), which is the
+                # authoritative terminal signal. call_ended only fires for calls
+                # that reached a person, so it drives outcome follow-up, not redials.
 
             elif event_type == "field_captured":
                 lead_repo = LeadRepo(session)
@@ -589,14 +577,15 @@ class WorkersBrain:
                     await dq_repo.mark_completed(entry.id)
                     continue
 
-                # Last gate before the dial. An entry queued while clear can be
-                # blocked afterwards; nothing leaves this loop unscrubbed.
-                national_status = lead.national_dnc_status or UNKNOWN
-                if not is_dialable(national_status):
-                    await dq_repo.mark_terminal(entry.id, "compliance_blocked")
-                    logger.warning(
-                        "dial refused for lead %s: national_dnc_status=%s", lead.id, national_status
-                    )
+                # Last gate before the dial — re-checks every hard eligibility rule
+                # (national DNC, entity suppression, terminal lead status), so a
+                # scheduled retry that became ineligible in the meantime is dropped
+                # before Twilio is ever called.
+                eligible, reason = await check_dial_eligibility(session, lead)
+                if not eligible:
+                    term = "compliance_blocked" if reason.startswith("national_dnc") else "ineligible"
+                    await dq_repo.mark_terminal(entry.id, term)
+                    logger.warning("dial refused for lead %s: %s", lead.id, reason)
                     continue
 
                 if not in_tcpa_window(lead.state, now):

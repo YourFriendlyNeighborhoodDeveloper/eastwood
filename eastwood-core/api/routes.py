@@ -755,31 +755,31 @@ async def twilio_status_callback(
     session: AsyncSession = Depends(get_session),
 ):
     """Twilio fires this when a call reaches a terminal status.
-    Marks the matching dial_queue entry so the concurrency slot is freed."""
-    from repos.repos import DialQueueRepo
+
+    Frees the concurrency slot, schedules a retry for an unanswered call when the
+    lead is still eligible, and closes the ai-agent session immediately."""
+    from domain.dialing import handle_terminal_status
 
     form = await request.form()
     call_status = str(form.get("CallStatus", ""))
 
-    terminal_map = {
-        "completed": "completed",
-        "no-answer": "no_answer",
-        "busy": "busy",
-        "failed": "failed",
-        "canceled": "cancelled",
-    }
-    new_status = terminal_map.get(call_status)
-    if not new_status:
-        return {"received": True}
+    result = await handle_terminal_status(
+        session, session_id, call_status, ai_agent=_get_ai_agent_client()
+    )
+    logger.info("twilio status callback: session=%s status=%s result=%s", session_id, call_status, result)
+    return result
 
-    dq_repo = DialQueueRepo(session)
-    entry = await dq_repo.get_by_session(session_id)
-    if entry:
-        await dq_repo.mark_terminal(entry.id, new_status)
-        await session.commit()
-        logger.info("twilio status callback: session=%s status=%s", session_id, new_status)
 
-    return {"received": True, "status": new_status}
+_ai_agent_client = None
+
+
+def _get_ai_agent_client():
+    """Module-level AiAgentClient, reused across callbacks (holds one httpx client)."""
+    global _ai_agent_client
+    if _ai_agent_client is None:
+        from clients.ai_agent import AiAgentClient
+        _ai_agent_client = AiAgentClient()
+    return _ai_agent_client
 
 
 @router.get("/api/dashboard/summary")

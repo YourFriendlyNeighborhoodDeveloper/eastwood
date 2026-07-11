@@ -612,6 +612,35 @@ class DialQueueRepo:
             .values(status=status, updated_at=datetime.now(timezone.utc))
         )
 
+    async def mark_terminal_if_dialing(self, entry_id: uuid.UUID, status: str) -> bool:
+        """Conditionally mark terminal only if still 'dialing'. Returns True iff this
+        call performed the transition — the persisted idempotency gate for duplicate
+        Twilio callbacks."""
+        result = await self._s.execute(
+            update(DialQueueEntry)
+            .where(DialQueueEntry.id == entry_id, DialQueueEntry.status == "dialing")
+            .values(status=status, updated_at=datetime.now(timezone.utc))
+        )
+        return (result.rowcount or 0) > 0
+
+    async def reschedule_if_dialing(
+        self, entry_id: uuid.UUID, new_scheduled_at: datetime, new_attempt_count: int
+    ) -> bool:
+        """Conditionally reschedule a retry only if still 'dialing'. Returns True iff
+        this call scheduled it, so a duplicate callback cannot move next_attempt_at
+        or increment the attempt a second time."""
+        result = await self._s.execute(
+            update(DialQueueEntry)
+            .where(DialQueueEntry.id == entry_id, DialQueueEntry.status == "dialing")
+            .values(
+                status="pending",
+                scheduled_at=new_scheduled_at,
+                attempt_count=new_attempt_count,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        return (result.rowcount or 0) > 0
+
     async def reap_stuck_dialing(self, older_than_minutes: int = 10) -> int:
         from datetime import timedelta
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
