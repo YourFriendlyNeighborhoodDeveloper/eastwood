@@ -118,6 +118,7 @@ class LeadRepo:
         provider: str | None = None,
         checked_at: datetime | None = None,
         source: str | None = None,
+        audit: dict | None = None,
     ) -> None:
         """Record a National DNC Registry clearance decision and its provenance."""
         await self._s.execute(
@@ -128,6 +129,7 @@ class LeadRepo:
                 national_dnc_provider=provider,
                 national_dnc_checked_at=checked_at,
                 national_dnc_source=source,
+                national_dnc_audit=audit,
                 updated_at=datetime.now(timezone.utc),
             )
         )

@@ -139,9 +139,9 @@ class _FakeLeadRepo:
     async def update_status(self, lead_id, status):
         _FakeLeadRepo.statuses.append((lead_id, status))
 
-    async def set_national_dnc(self, lead_id, status, provider=None, checked_at=None, source=None):
+    async def set_national_dnc(self, lead_id, status, provider=None, checked_at=None, source=None, audit=None):
         _FakeLeadRepo.dnc_writes.append(
-            {"lead_id": lead_id, "status": status, "provider": provider, "source": source}
+            {"lead_id": lead_id, "status": status, "provider": provider, "source": source, "audit": audit}
         )
 
 

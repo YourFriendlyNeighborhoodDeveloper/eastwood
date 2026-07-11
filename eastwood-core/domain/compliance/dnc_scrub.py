@@ -50,7 +50,10 @@ class ScrubResult:
     status: str                 # clear | blocked | unknown
     provider: str               # which provider decided
     checked_at: datetime        # when
-    source: str | None = None   # list version / fingerprint, when exposed
+    source: str | None = None   # compact provenance string, when exposed
+    # Structured audit trail, persisted to leads.national_dnc_audit. Must never
+    # contain a raw SAN, credentials, or any registry phone number.
+    audit: dict | None = None
 
     def __post_init__(self) -> None:
         if self.status not in SCRUBBABLE_STATUSES:
@@ -94,6 +97,10 @@ class LocalCsvScrubProvider(DncScrubProvider):
         self._path = pathlib.Path(path)
         self._blocked: frozenset[str] | None = None
         self._source: str | None = None
+
+    @classmethod
+    def from_settings(cls, settings) -> "LocalCsvScrubProvider":
+        return cls(settings.national_dnc_blocklist_path)
 
     def _load(self) -> frozenset[str]:
         if self._blocked is not None:
@@ -154,21 +161,27 @@ def _to_e164(raw: str) -> str | None:
 
 # ── Provider registry ─────────────────────────────────────────────────────────
 #
-# Keyed by name so no vendor is hardcoded into the dial path. Register a real
-# registry provider here and set DNC_SCRUB_PROVIDER to its name.
+# Keyed by name so no vendor is hardcoded into the dial path. Each provider
+# builds itself from settings via from_settings(). Set DNC_SCRUB_PROVIDER to a
+# registered name. ftc_registry is imported lazily to avoid a circular import
+# (it depends on the base classes defined above).
 
-_PROVIDERS: dict[str, object] = {
-    LocalCsvScrubProvider.name: LocalCsvScrubProvider,
-}
+
+def _provider_registry() -> dict[str, type[DncScrubProvider]]:
+    from .ftc_registry import FtcRegistryScrubProvider
+
+    return {
+        LocalCsvScrubProvider.name: LocalCsvScrubProvider,
+        FtcRegistryScrubProvider.name: FtcRegistryScrubProvider,
+    }
 
 
 def get_scrub_provider(settings) -> DncScrubProvider:
     name = settings.dnc_scrub_provider
-    factory = _PROVIDERS.get(name)
+    registry = _provider_registry()
+    factory = registry.get(name)
     if factory is None:
         raise ValueError(
-            f"unknown DNC scrub provider {name!r}; registered: {sorted(_PROVIDERS)}"
+            f"unknown DNC scrub provider {name!r}; registered: {sorted(registry)}"
         )
-    if factory is LocalCsvScrubProvider:
-        return LocalCsvScrubProvider(settings.national_dnc_blocklist_path)
-    return factory()  # type: ignore[operator]
+    return factory.from_settings(settings)

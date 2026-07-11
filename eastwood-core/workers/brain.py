@@ -92,6 +92,7 @@ class WorkersBrain:
             provider=result.provider,
             checked_at=result.checked_at,
             source=result.source,
+            audit=getattr(result, "audit", None),
         )
         return result.status
 

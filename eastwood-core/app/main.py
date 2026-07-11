@@ -48,6 +48,7 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS national_dnc_checked_at TIMESTAMPTZ",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS national_dnc_provider VARCHAR(64)",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS national_dnc_source VARCHAR(128)",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS national_dnc_audit JSONB",
             "CREATE INDEX IF NOT EXISTS ix_leads_national_dnc_status ON leads(national_dnc_status)",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS ai_summary TEXT",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS health_flags JSONB",

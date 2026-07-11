@@ -64,6 +64,8 @@ class Lead(Base):
     national_dnc_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     national_dnc_provider: Mapped[str | None] = mapped_column(String(64))
     national_dnc_source: Mapped[str | None] = mapped_column(String(128))
+    # Structured scrub provenance. Never holds a raw SAN or registry numbers.
+    national_dnc_audit: Mapped[dict | None] = mapped_column(JSONB)
     source_batch_id: Mapped[str | None] = mapped_column(String(64), index=True)
     ap_cents: Mapped[int | None] = mapped_column(Integer)  # annual premium in cents when policy written
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

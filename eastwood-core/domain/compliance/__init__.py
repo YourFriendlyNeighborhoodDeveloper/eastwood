@@ -11,6 +11,19 @@ from .dnc_scrub import (
     get_scrub_provider,
     is_dialable,
 )
+from .ftc_registry import (
+    DatasetManifest,
+    FtcRegistryDownloader,
+    FtcRegistryScrubProvider,
+    RefreshResult,
+    RegistryDownloader,
+    parse_area_codes,
+    refresh_from_settings,
+    refresh_registry,
+    san_fingerprint,
+    split_us_number,
+    write_dataset,
+)
 
 __all__ = [
     "BLOCKED",
@@ -24,4 +37,15 @@ __all__ = [
     "ScrubResult",
     "get_scrub_provider",
     "is_dialable",
+    "DatasetManifest",
+    "FtcRegistryDownloader",
+    "FtcRegistryScrubProvider",
+    "RefreshResult",
+    "RegistryDownloader",
+    "parse_area_codes",
+    "refresh_from_settings",
+    "refresh_registry",
+    "san_fingerprint",
+    "split_us_number",
+    "write_dataset",
 ]

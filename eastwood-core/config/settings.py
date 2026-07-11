@@ -58,8 +58,24 @@ class Settings(BaseSettings):
     # domain.compliance.dnc_scrub so no vendor is hardcoded into the dial path.
     # "local_csv" is a blocklist-only stand-in: it can prove a number is on the
     # registry, never that it is clear, so on its own it dials nobody.
+    # "ftc_registry" is the official downloaded-dataset provider.
     dnc_scrub_provider: str = "local_csv"
     national_dnc_blocklist_path: str = "data/private/national_dnc_blocked.local.csv"
+
+    # ── Official FTC National DNC Registry (provider "ftc_registry") ───────────
+    # Subscription Account Number and login. Secrets — never committed, never
+    # logged; only a fingerprint is persisted.
+    dnc_san: str = ""
+    dnc_registry_username: str = ""
+    dnc_registry_password: str = ""
+    # Comma-separated subscribed area codes, e.g. "313,248,586".
+    dnc_area_codes: str = ""
+    # Downloaded Registry dataset lives here — under data/private, gitignored.
+    dnc_data_directory: str = "data/private/dnc_registry"
+    # A dataset older than this many days can no longer clear a number.
+    dnc_max_data_age_days: int = 31
+    # Operator-configured automated-download endpoint (documented FTC interface).
+    dnc_registry_download_url: str = ""
 
     score_hot_threshold: int = 75
     score_warm_threshold: int = 50
