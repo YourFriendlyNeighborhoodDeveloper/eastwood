@@ -40,6 +40,10 @@ interface ActiveSession {
   callEndedPublished: boolean;
   /** True once Twilio bound the media stream — i.e. the call reached a person. */
   telephonyBound: boolean;
+  /** True once the OpenAI Realtime session has been created/updated. */
+  realtimeReady: boolean;
+  /** True once the outbound opening has been sent — exactly one per call. */
+  openingSent: boolean;
   /** Set synchronously at the start of reclamation so a second terminal event
    *  cannot double-publish, double-decrement, or re-tear-down. */
   closing: boolean;
@@ -47,6 +51,19 @@ interface ActiveSession {
   telephonyWs: WebSocket | null;
   streamSid: string | null;
   startedAt: number;
+}
+
+/**
+ * Imogen's first words on a connected outbound call. She speaks first (the model
+ * does not wait for the prospect to say hello), states the life-insurance purpose
+ * plainly, discloses she is an AI, and confirms identity — short, under 20 words.
+ */
+export function openingLine(lead: LeadContext, agentDisplayName: string): string {
+  const name = lead.firstName?.trim();
+  if (name) {
+    return `Hi, this is ${agentDisplayName}, an AI assistant calling about life insurance options. Am I speaking with ${name}?`;
+  }
+  return `Hi, this is ${agentDisplayName}, an AI assistant calling about life insurance options. Is now an okay time?`;
 }
 
 /** Injectable so tests can drive a call without an OpenAI connection. */
@@ -88,6 +105,8 @@ export class RealtimeHandler {
       dncCaptured: false,
       callEndedPublished: false,
       telephonyBound: false,
+      realtimeReady: false,
+      openingSent: false,
       closing: false,
       openaiWs: null,
       telephonyWs: null,
@@ -150,17 +169,20 @@ export class RealtimeHandler {
     session.telephonyBound = true;
 
     telephonyWs.on("message", (data) => {
-      if (session.openaiWs?.readyState === WebSocket.OPEN) {
-        const msg = JSON.parse(data.toString());
-        if (msg.event === "start") { session.streamSid = msg.streamSid; }
-        if (msg.event === "media") {
-          session.openaiWs.send(
-            JSON.stringify({
-              type: "input_audio_buffer.append",
-              audio: msg.media.payload,
-            })
-          );
-        }
+      const msg = JSON.parse(data.toString());
+      if (msg.event === "start") {
+        // The media stream has started; outbound audio can now reach the prospect.
+        session.streamSid = msg.streamSid;
+        this.maybeSendOpening(session);
+        return;
+      }
+      if (msg.event === "media" && session.openaiWs?.readyState === WebSocket.OPEN) {
+        session.openaiWs.send(
+          JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: msg.media.payload,
+          })
+        );
       }
     });
 
@@ -169,6 +191,36 @@ export class RealtimeHandler {
     });
 
     return true;
+  }
+
+  /**
+   * Imogen speaks first. Once the Realtime session is ready AND the media stream
+   * has started (so audio can actually reach the prospect), send exactly one
+   * opening — she does not wait for the prospect to say hello. Guarded by
+   * openingSent so repeated readiness events (every session.update, a re-`start`)
+   * never send a second greeting.
+   */
+  private maybeSendOpening(session: ActiveSession): void {
+    if (session.openingSent) return;
+    if (!session.realtimeReady) return;
+    if (!session.streamSid) return;
+    if (session.openaiWs?.readyState !== WebSocket.OPEN) return;
+
+    session.openingSent = true;
+    const cfg = loadConfig();
+    const opening = openingLine(session.lead, cfg.agentDisplayName);
+    session.openaiWs.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          instructions:
+            "This is the very first thing you say on the call — before the prospect " +
+            "speaks. Say exactly this, word for word, then stop and wait for their " +
+            `answer. Do not add anything else: "${opening}"`,
+        },
+      })
+    );
+    logger.info({ sessionId: session.sessionId }, "sent outbound opening");
   }
 
   private pushSessionUpdate(session: ActiveSession): void {
@@ -213,6 +265,12 @@ export class RealtimeHandler {
   private handleOpenAiEvent(session: ActiveSession, msg: Record<string, unknown>): void {
     const type = msg["type"] as string;
     if (type === "error" || type.startsWith("session.")) { logger.info({ sessionId: session.sessionId, type, msg }, "openai event"); }
+    if (type === "session.created" || type === "session.updated") {
+      // The Realtime session is ready. Fires on every session.update, so the
+      // opening is guarded by openingSent, not this event.
+      session.realtimeReady = true;
+      this.maybeSendOpening(session);
+    }
     if (type === "response.output_audio.delta") {
       const delta = msg["delta"] as string | undefined;
       if (delta && session.telephonyWs?.readyState === WebSocket.OPEN) {
