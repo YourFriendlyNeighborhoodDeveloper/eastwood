@@ -348,6 +348,11 @@ describe("sales flow end-to-end", () => {
     assert.equal(fetchStub.countCalls("/api/appointments"), 1, "core must be written to exactly once");
     assert.equal(bridge.count("appointment_booked"), 0, "agent must not publish appointment_booked — core does");
 
+    // The machine never left `greeting` — tool availability is derived from lead
+    // data, not from a state value nothing advances. Checked before end_call,
+    // which reclaims the session.
+    assert.equal(handler.getSession(sessionId)?.state, "greeting");
+
     await callTool(socket, "end_call", { outcome: "appointment_set" });
     const ended = bridge.find("call_ended");
     assert.ok(ended, "call_ended must be published — this drives follow-ups and retries in brain.py");
@@ -359,11 +364,9 @@ describe("sales flow end-to-end", () => {
       "call_ended",
     ]);
 
-    // The machine never left `greeting` — and the sale still completed. That is
-    // the point of the fix: tool availability is derived from lead data, not from
-    // a state value nothing advances. If the machine is repaired later, this
-    // assertion should be updated, not the flow above.
-    assert.equal(handler.getSession(sessionId)?.state, "greeting");
+    // end_call reclaims the session.
+    assert.equal(handler.getSession(sessionId), null, "end_call must remove the session");
+    assert.equal(handler.activeSessionCount(), 0);
   });
 
   it("reopens field capture when a confirmed condition pulls Tier-2 follow-ups onto the agenda", async () => {

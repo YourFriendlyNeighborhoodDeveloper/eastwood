@@ -32,6 +32,30 @@ export const sessionsTotal = new Counter({
   registers: [registry],
 });
 
+export const sessionsCreated = new Counter({
+  name: "agent_sessions_created_total",
+  help: "Total call sessions created",
+  registers: [registry],
+});
+
+export const sessionsClosed = new Counter({
+  name: "agent_sessions_closed_total",
+  help: "Total call sessions reclaimed (terminal or reaped)",
+  registers: [registry],
+});
+
+export const sessionsReaped = new Counter({
+  name: "agent_sessions_reaped_total",
+  help: "Sessions reclaimed by the abandoned-session reaper",
+  registers: [registry],
+});
+
+export const duplicateTerminalEvents = new Counter({
+  name: "agent_duplicate_terminal_events_total",
+  help: "Terminal events for a session already being reclaimed",
+  registers: [registry],
+});
+
 export const sessionDurationSec = new Histogram({
   name: "agent_session_duration_seconds",
   help: "Call session duration",

@@ -6,6 +6,10 @@ import {
   realtimeReconnects,
   sessionsActive,
   sessionsTotal,
+  sessionsCreated,
+  sessionsClosed,
+  sessionsReaped,
+  duplicateTerminalEvents,
   sessionDurationSec,
   turnLatencyMs,
   turnsTotal,
@@ -30,6 +34,11 @@ interface ActiveSession {
   appointmentBooked: boolean;
   dncCaptured: boolean;
   callEndedPublished: boolean;
+  /** True once Twilio bound the media stream — i.e. the call reached a person. */
+  telephonyBound: boolean;
+  /** Set synchronously at the start of reclamation so a second terminal event
+   *  cannot double-publish, double-decrement, or re-tear-down. */
+  closing: boolean;
   openaiWs: WebSocket | null;
   telephonyWs: WebSocket | null;
   streamSid: string | null;
@@ -49,6 +58,7 @@ export class RealtimeHandler {
   private sessions = new Map<string, ActiveSession>();
   private bridge: KafkaBridge;
   private createOpenAiSocket: OpenAiSocketFactory;
+  private reaperTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     bridge: KafkaBridge,
@@ -59,7 +69,6 @@ export class RealtimeHandler {
   }
 
   async createSession(sessionId: string, lead: LeadContext): Promise<void> {
-    const cfg = loadConfig();
     const actor = createActor(salesMachine, { input: { lead } });
     actor.start();
 
@@ -71,6 +80,8 @@ export class RealtimeHandler {
       appointmentBooked: false,
       dncCaptured: false,
       callEndedPublished: false,
+      telephonyBound: false,
+      closing: false,
       openaiWs: null,
       telephonyWs: null,
       streamSid: null,
@@ -79,9 +90,18 @@ export class RealtimeHandler {
 
     this.sessions.set(sessionId, session);
     sessionsActive.inc();
+    sessionsCreated.inc();
     sessionsTotal.inc({ outcome: "started" });
 
-    await this.connectOpenAI(session);
+    try {
+      await this.connectOpenAI(session);
+    } catch (err) {
+      // The call never connected: reclaim the slot without emitting call_ended
+      // (telephony never bound), so no phantom call is recorded.
+      logger.error({ err, sessionId }, "session setup failed");
+      this.discard(session, "setup_failed");
+      throw err;
+    }
   }
 
   private async connectOpenAI(session: ActiveSession): Promise<void> {
@@ -104,11 +124,15 @@ export class RealtimeHandler {
 
     ws.on("close", () => {
       logger.info({ sessionId: session.sessionId }, "openai ws closed");
+      // Our own teardown removes these listeners before closing, so reaching
+      // here means the socket dropped on its own — reclaim the session.
+      void this.endSession(session.sessionId, "openai_closed");
     });
 
     ws.on("error", (err) => {
       logger.error({ err, sessionId: session.sessionId }, "openai ws error");
       realtimeReconnects.inc();
+      void this.endSession(session.sessionId, "openai_error");
     });
   }
 
@@ -116,6 +140,7 @@ export class RealtimeHandler {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     session.telephonyWs = telephonyWs;
+    session.telephonyBound = true;
 
     telephonyWs.on("message", (data) => {
       if (session.openaiWs?.readyState === WebSocket.OPEN) {
@@ -238,12 +263,22 @@ export class RealtimeHandler {
         session,
       });
       turnLatencyMs.observe(Date.now() - start);
+
+      // A terminal tool (end_call) ends the call. Acknowledge the tool result,
+      // but do not ask the model to speak again, and reclaim the session — the
+      // call is over whether or not the media stream closes afterward.
+      const terminal = result["ended"] === true;
+
       // Refresh the tool list *before* asking the model to respond. A tool that
       // just unlocked the next stage (get_quote → book_appointment) must be
       // callable on this turn, not the one after it: deliverToolResult sends
       // response.create, which begins generation immediately.
       this.pushSessionUpdate(session);
-      this.deliverToolResult(session, callId, result);
+      this.deliverToolResult(session, callId, result, { requestResponse: !terminal });
+
+      if (terminal) {
+        await this.endSession(session.sessionId, "end_call");
+      }
     } catch (err) {
       logger.error({ err, toolName, sessionId: session.sessionId }, "tool handler error");
       this.deliverToolResult(session, callId, { error: String(err) });
@@ -253,7 +288,8 @@ export class RealtimeHandler {
   private deliverToolResult(
     session: ActiveSession,
     callId: string,
-    result: Record<string, unknown>
+    result: Record<string, unknown>,
+    opts: { requestResponse?: boolean } = {}
   ): void {
     session.openaiWs?.send(
       JSON.stringify({
@@ -265,7 +301,9 @@ export class RealtimeHandler {
         },
       })
     );
-    session.openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    if (opts.requestResponse !== false) {
+      session.openaiWs?.send(JSON.stringify({ type: "response.create" }));
+    }
   }
 
   /**
@@ -283,13 +321,26 @@ export class RealtimeHandler {
     return "hangup";
   }
 
+  /**
+   * Reclaim a session at a terminal event (end_call, hangup, socket close,
+   * reaper). Idempotent: any number of concurrent or repeated terminal events
+   * publish call_ended at most once, decrement the active gauge once, and tear
+   * the session down once.
+   */
   async endSession(sessionId: string, reason?: string): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) return;                       // already reclaimed
+    if (session.closing) {                       // a concurrent terminal event
+      duplicateTerminalEvents.inc();
+      return;
+    }
+    session.closing = true;                      // set before the first await
 
-    // Non-tool endings must still produce an outcome, otherwise the call leaves
-    // no record and no follow-up or retry is ever scheduled.
-    if (!session.callEndedPublished) {
+    // A call that reached a person and was not already closed by end_call still
+    // needs an outcome — otherwise no follow-up or retry is ever scheduled. A
+    // call that never bound telephony (never answered, failed setup) records
+    // nothing: there was no call.
+    if (session.telephonyBound && !session.callEndedPublished) {
       session.callEndedPublished = true;
       try {
         await this.bridge.publishEvent({
@@ -304,16 +355,80 @@ export class RealtimeHandler {
       }
     }
 
-    session.openaiWs?.close();
-    session.telephonyWs?.close();
-    session.actor.stop();
+    this.teardown(session);
+    this.sessions.delete(sessionId);
+    sessionsActive.dec();
+    sessionsClosed.inc();
 
     const durationSec = (Date.now() - session.startedAt) / 1000;
     sessionDurationSec.observe(durationSec);
-    sessionsActive.dec();
-
-    this.sessions.delete(sessionId);
     logger.info({ sessionId, reason, durationSec }, "session ended");
+  }
+
+  /** Reclaim a session that never connected, without emitting call_ended. */
+  private discard(session: ActiveSession, reason: string): void {
+    if (session.closing) return;
+    session.closing = true;
+    this.teardown(session);
+    if (this.sessions.delete(session.sessionId)) {
+      sessionsActive.dec();
+      sessionsClosed.inc();
+    }
+    logger.info({ sessionId: session.sessionId, reason }, "session discarded");
+  }
+
+  /** Release every per-session resource: listeners, sockets, actor, buffers. */
+  private teardown(session: ActiveSession): void {
+    for (const ws of [session.openaiWs, session.telephonyWs]) {
+      if (!ws) continue;
+      // Remove listeners first so close() cannot re-enter endSession.
+      try { ws.removeAllListeners(); } catch { /* noop */ }
+      try { ws.close(); } catch { /* noop */ }
+    }
+    session.openaiWs = null;
+    session.telephonyWs = null;
+    session.streamSid = null;
+    try { session.actor.stop(); } catch { /* noop */ }
+  }
+
+  /**
+   * Reclaim sessions whose terminal callback never arrived — a call nobody
+   * answered, or a dropped Twilio status webhook. Without this a stuck session
+   * holds a concurrency slot forever.
+   */
+  async reapAbandoned(nowMs: number = Date.now()): Promise<number> {
+    const maxAgeMs = loadConfig().sessionMaxAgeSec * 1000;
+    const stale = [...this.sessions.values()].filter(
+      (s) => !s.closing && nowMs - s.startedAt > maxAgeMs
+    );
+    for (const session of stale) {
+      sessionsReaped.inc();
+      await this.endSession(session.sessionId, "reaped");
+    }
+    return stale.length;
+  }
+
+  startReaper(): void {
+    if (this.reaperTimer) return;
+    const intervalMs = loadConfig().reaperIntervalSec * 1000;
+    this.reaperTimer = setInterval(() => {
+      void this.reapAbandoned().catch((err) =>
+        logger.error({ err }, "reaper sweep failed")
+      );
+    }, intervalMs);
+    this.reaperTimer.unref?.();
+  }
+
+  stopReaper(): void {
+    if (this.reaperTimer) {
+      clearInterval(this.reaperTimer);
+      this.reaperTimer = null;
+    }
+  }
+
+  /** Test/introspection accessor for the live session count. */
+  activeSessionCount(): number {
+    return this.sessions.size;
   }
 
   getSession(sessionId: string): { id: string; state: string; lead: LeadContext } | null {

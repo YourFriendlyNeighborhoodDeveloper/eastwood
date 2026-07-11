@@ -24,6 +24,10 @@ const ConfigSchema = z.object({
   topicCallsEnded: z.string().default("calls.ended"),
   realtimeModel: z.string().default("gpt-4o-realtime-preview"),
   realtimeVoice: z.string().default("alloy"),
+  // Reaper: reclaim a session whose terminal callback never arrives (no-answer,
+  // dropped webhook). Age cap bounds how long an abandoned call can hold a slot.
+  sessionMaxAgeSec: z.coerce.number().int().positive().default(600),
+  reaperIntervalSec: z.coerce.number().int().positive().default(30),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -55,6 +59,8 @@ export function loadConfig(): Config {
     topicCallsEnded: process.env["TOPIC_CALLS_ENDED"],
     realtimeModel: process.env["REALTIME_MODEL"],
     realtimeVoice: process.env["REALTIME_VOICE"],
+    sessionMaxAgeSec: process.env["SESSION_MAX_AGE_SEC"],
+    reaperIntervalSec: process.env["REAPER_INTERVAL_SEC"],
   });
   return _config;
 }

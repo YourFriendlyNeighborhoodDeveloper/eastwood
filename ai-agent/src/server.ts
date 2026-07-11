@@ -14,6 +14,7 @@ async function main() {
   await bridge.connect();
 
   const realtime = new RealtimeHandler(bridge);
+  realtime.startReaper();
 
   bridge.setCommandHandler(async (cmd) => {
     if (cmd.command === "start_session") {
@@ -89,6 +90,7 @@ async function main() {
 
   const shutdown = async () => {
     logger.info("shutting down");
+    realtime.stopReaper();
     await bridge.disconnect();
     await app.close();
     process.exit(0);
