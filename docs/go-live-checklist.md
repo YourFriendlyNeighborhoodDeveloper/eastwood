@@ -86,6 +86,10 @@ official provider before any real dial.**
 - [ ] `BYPASS_TCPA=false`
       — With `APP_ENV=production` **and** `BYPASS_TCPA=true`, `eastwood-core`
       refuses to boot (compliance guard). A clean boot confirms this is off.
+- [ ] `DNC_TEST_ALLOWLIST` empty
+      — The dev test allowlist scrubs self-owned numbers as `exempt` without a
+      provider. In production it must be empty; `eastwood-core` refuses to boot
+      with `APP_ENV=production` and a non-empty allowlist (same compliance guard).
 - [ ] `SCORE_HOT_THRESHOLD=75`
 - [ ] `SCORE_WARM_THRESHOLD=50`
 - [ ] **Verify state timezone calling windows** — dialing is gated to 8am–9pm local
@@ -293,7 +297,10 @@ are configuration, credentials, or data:
 - [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
       the formula adapter; carrier rate tables are not loaded (§4).
 - [ ] **Production-safe environment values** — confirm `APP_ENV=production`,
-      `BYPASS_TCPA=false`, thresholds `75`/`50`, `RESET_RATE_TABLE_ON_BOOT=false`,
-      and `ACTIVE_STATES` covering the campaign (§3).
+      `BYPASS_TCPA=false`, `DNC_TEST_ALLOWLIST` empty, thresholds `75`/`50`,
+      `RESET_RATE_TABLE_ON_BOOT=false`, and `ACTIVE_STATES` covering the campaign
+      (§3). `DNC_TEST_ALLOWLIST` scrubs listed numbers as exempt without a
+      provider — a testing affordance only; `eastwood-core` refuses to boot in
+      production if it is non-empty.
 
 When every box above and in §1–§9 is checked: **GO.**

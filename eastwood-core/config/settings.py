@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     dnc_scrub_provider: str = "local_csv"
     national_dnc_blocklist_path: str = "data/private/national_dnc_blocked.local.csv"
 
+    # Comma-separated E.164 numbers the operator personally owns and consents to
+    # being called for end-to-end testing. These scrub as "exempt" without hitting
+    # a provider. This is NOT a bypass: every other number still fails closed.
+    # Must be empty in production (enforced by the boot guard).
+    dnc_test_allowlist: str = ""
+
     # ── Official FTC National DNC Registry (provider "ftc_registry") ───────────
     # Subscription Account Number and login. Secrets — never committed, never
     # logged; only a fingerprint is persisted.
@@ -167,7 +173,8 @@ def assert_production_safety(settings: Settings | None = None) -> None:
 
     BYPASS_TCPA short-circuits the 8am-9pm local-time calling window. Dialing
     outside that window is a per-call TCPA violation, so production must never
-    start with it set.
+    start with it set. DNC_TEST_ALLOWLIST scrubs listed numbers as exempt without
+    a provider — a testing affordance that must never be present in production.
     """
     s = settings or get_settings()
     if s.app_env.strip().lower() == "production" and s.bypass_tcpa:
@@ -175,4 +182,11 @@ def assert_production_safety(settings: Settings | None = None) -> None:
             "Refusing to start: APP_ENV=production with BYPASS_TCPA=true. "
             "This disables the TCPA calling-window check for live outbound "
             "dialing. Unset BYPASS_TCPA, or set APP_ENV to a non-production value."
+        )
+    if s.app_env.strip().lower() == "production" and s.dnc_test_allowlist.strip():
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with DNC_TEST_ALLOWLIST set. "
+            "The allowlist scrubs listed numbers as exempt without a provider — a "
+            "testing-only affordance. Clear DNC_TEST_ALLOWLIST, or set APP_ENV to a "
+            "non-production value."
         )

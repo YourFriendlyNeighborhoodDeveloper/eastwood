@@ -59,6 +59,20 @@ class ScrubResult:
         if self.status not in SCRUBBABLE_STATUSES:
             raise ValueError(f"a scrub provider may not return {self.status!r}")
 
+    @classmethod
+    def operator_exempt(cls, checked_at: datetime, source: str, audit: dict | None = None) -> "ScrubResult":
+        """An operator-declared exemption — e.g. a self-owned test number on the
+        allowlist. Deliberately bypasses the provider-status check: `exempt` is an
+        operator decision, which a provider may never fabricate but the operator may.
+        """
+        obj = cls.__new__(cls)
+        object.__setattr__(obj, "status", EXEMPT)
+        object.__setattr__(obj, "provider", source)
+        object.__setattr__(obj, "checked_at", checked_at)
+        object.__setattr__(obj, "source", source)
+        object.__setattr__(obj, "audit", audit)
+        return obj
+
 
 class DncScrubProvider(ABC):
     """Checks a number against the National DNC Registry.
@@ -185,3 +199,43 @@ def get_scrub_provider(settings) -> DncScrubProvider:
             f"unknown DNC scrub provider {name!r}; registered: {sorted(registry)}"
         )
     return factory.from_settings(settings)
+
+
+# ── Test allowlist ────────────────────────────────────────────────────────────
+#
+# A narrow allowlist of self-owned numbers the operator consents to for
+# end-to-end testing. NOT a bypass: only the exact numbers listed scrub as
+# exempt; every other number still goes through the provider and fails closed.
+# The boot guard forbids a non-empty allowlist in production.
+
+
+def parse_test_allowlist(raw: str | None) -> frozenset[str]:
+    if not raw:
+        return frozenset()
+    return frozenset(n.strip() for n in raw.split(",") if n.strip())
+
+
+async def scrub_number(
+    phone_e164: str,
+    *,
+    provider: DncScrubProvider,
+    settings,
+    now: datetime | None = None,
+) -> ScrubResult:
+    """Resolve a number's clearance: the test allowlist first, then the provider.
+
+    A number on DNC_TEST_ALLOWLIST scrubs as `exempt` without touching a provider,
+    so the operator can dial a phone they own end to end. Any number not on the
+    list falls through to the provider unchanged and stays fail-closed.
+    """
+    now = now or datetime.now(timezone.utc)
+    if phone_e164 in parse_test_allowlist(settings.dnc_test_allowlist):
+        logger.info(
+            "DNC test allowlist: %s scrubbed exempt (operator-owned test number)", phone_e164
+        )
+        return ScrubResult.operator_exempt(
+            checked_at=now,
+            source="test_allowlist",
+            audit={"reason": "operator_test_allowlist", "checked_at": now.isoformat()},
+        )
+    return await provider.scrub(phone_e164)

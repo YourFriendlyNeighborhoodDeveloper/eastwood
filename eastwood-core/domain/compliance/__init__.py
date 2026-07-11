@@ -10,6 +10,8 @@ from .dnc_scrub import (
     ScrubResult,
     get_scrub_provider,
     is_dialable,
+    parse_test_allowlist,
+    scrub_number,
 )
 from .ftc_registry import (
     DatasetManifest,
@@ -37,6 +39,8 @@ __all__ = [
     "ScrubResult",
     "get_scrub_provider",
     "is_dialable",
+    "parse_test_allowlist",
+    "scrub_number",
     "DatasetManifest",
     "FtcRegistryDownloader",
     "FtcRegistryScrubProvider",

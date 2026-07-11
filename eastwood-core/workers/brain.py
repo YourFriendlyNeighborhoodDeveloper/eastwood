@@ -10,7 +10,7 @@ from clients.ai_agent import AiAgentClient
 from clients.twilio_sms import SmsClient
 from config.settings import get_settings
 from db.session import session_scope
-from domain.compliance import BLOCKED, UNKNOWN, get_scrub_provider, is_dialable
+from domain.compliance import BLOCKED, UNKNOWN, get_scrub_provider, is_dialable, scrub_number
 from domain.normalization import normalize_lead_payload
 from domain.router import route
 from domain.scorer import score_lead
@@ -80,7 +80,10 @@ class WorkersBrain:
             return current
 
         try:
-            result = await self._dnc_scrub.scrub(lead.phone_e164)
+            # scrub_number checks the operator test allowlist before any provider.
+            result = await scrub_number(
+                lead.phone_e164, provider=self._dnc_scrub, settings=self._settings
+            )
         except Exception:
             logger.exception(
                 "national DNC scrub failed for lead %s — treating as %s", lead.id, UNKNOWN
