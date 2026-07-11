@@ -10,6 +10,7 @@ from clients.ai_agent import AiAgentClient
 from clients.twilio_sms import SmsClient
 from config.settings import get_settings
 from db.session import session_scope
+from domain.compliance import BLOCKED, UNKNOWN, get_scrub_provider, is_dialable
 from domain.normalization import normalize_lead_payload
 from domain.router import route
 from domain.scorer import score_lead
@@ -63,6 +64,45 @@ class WorkersBrain:
         self._settings = get_settings()
         self._ai_agent = AiAgentClient()
         self._sms = SmsClient() if self._settings.twilio_account_sid else None
+        self._dnc_scrub = get_scrub_provider(self._settings)
+
+    async def _ensure_national_dnc_status(self, session, lead: Any) -> str:
+        """Resolve a lead's National DNC clearance, scrubbing if still undecided.
+
+        A decided status is never overwritten: an operator's `exempt`, or an
+        earlier `clear` / `blocked`, survives a provider that has no opinion.
+        Any provider failure resolves to `unknown`, which is not dialable — the
+        gate fails closed.
+        """
+        current = getattr(lead, "national_dnc_status", None) or UNKNOWN
+        if current != UNKNOWN:
+            return current
+
+        try:
+            result = await self._dnc_scrub.scrub(lead.phone_e164)
+        except Exception:
+            logger.exception(
+                "national DNC scrub failed for lead %s — treating as %s", lead.id, UNKNOWN
+            )
+            return UNKNOWN
+
+        await LeadRepo(session).set_national_dnc(
+            lead.id,
+            result.status,
+            provider=result.provider,
+            checked_at=result.checked_at,
+            source=result.source,
+        )
+        return result.status
+
+    async def _block_lead_national_dnc(self, session, lead_id: uuid.UUID) -> None:
+        """The number is on the registry. Stop everything already scheduled for it."""
+        await LeadRepo(session).update_status(lead_id, "compliance_blocked")
+        await DialQueueRepo(session).cancel_for_lead(lead_id)
+        await FollowupRepo(session).cancel_pending_for_lead(lead_id)
+        logger.warning(
+            "lead %s is on the national DNC registry — dialing and follow-ups cancelled", lead_id
+        )
 
     async def on_raw(self, msg: dict) -> None:
         with worker_processing_seconds.labels(stage="normalize").time():
@@ -210,6 +250,32 @@ class WorkersBrain:
                 await lead_repo.update_score(
                     lead_id, score_result.score, score_result.band, score_result.components
                 )
+
+                # ── National DNC Registry gate ───────────────────────────────
+                # Scored above regardless: an unscrubbed lead is worth storing and
+                # ranking, it just may not be dialed. Only `blocked` stops here.
+                national_status = await self._ensure_national_dnc_status(session, lead)
+                if national_status == BLOCKED:
+                    await self._block_lead_national_dnc(session, lead_id)
+                    leads_routed.labels(
+                        tenant_id=tenant_id, action="compliance_blocked", band=score_result.band
+                    ).inc()
+                    from kafka_io.kafka_client import publish
+                    await publish(
+                        self._settings.topic_leads_routed,
+                        {
+                            "lead_id": str(lead_id),
+                            "tenant_id": tenant_id,
+                            "action": "compliance_blocked",
+                            "reason": "national_dnc_registry",
+                            "national_dnc_status": national_status,
+                            "score": score_result.score,
+                            "band": score_result.band,
+                            "triage_bucket": triage_result.bucket,
+                        },
+                        key=str(lead_id),
+                    )
+                    return
 
                 tcpa_result = evaluate_tcpa(
                     action="outbound_dial",
@@ -469,8 +535,22 @@ class WorkersBrain:
                         logger.info("captured field=%s for lead %s", field, lead_id)
 
     async def enqueue_call(self, lead: Any, tenant_id: str, priority: float = 0.0) -> None:
-        """Add a lead to the dial queue for autonomous dialing. Called by score_and_route."""
+        """Add a lead to the dial queue for autonomous dialing. Called by score_and_route.
+
+        Refuses any lead without National DNC clearance. The lead is re-read here
+        because the scrub writes with an UPDATE — the caller's ORM copy still
+        carries the pre-scrub status.
+        """
         async with session_scope() as session:
+            lead_repo = LeadRepo(session)
+            fresh = await lead_repo.get_by_id(lead.id)
+            national_status = (getattr(fresh, "national_dnc_status", None) if fresh else None) or UNKNOWN
+            if not is_dialable(national_status):
+                logger.warning(
+                    "refusing to queue lead %s: national_dnc_status=%s", lead.id, national_status
+                )
+                return
+
             dq_repo = DialQueueRepo(session)
             entry = await dq_repo.enqueue(
                 lead_id=lead.id,
@@ -506,6 +586,16 @@ class WorkersBrain:
                 lead = await lead_repo.get_by_id(entry.lead_id)
                 if not lead:
                     await dq_repo.mark_completed(entry.id)
+                    continue
+
+                # Last gate before the dial. An entry queued while clear can be
+                # blocked afterwards; nothing leaves this loop unscrubbed.
+                national_status = lead.national_dnc_status or UNKNOWN
+                if not is_dialable(national_status):
+                    await dq_repo.mark_terminal(entry.id, "compliance_blocked")
+                    logger.warning(
+                        "dial refused for lead %s: national_dnc_status=%s", lead.id, national_status
+                    )
                     continue
 
                 if not in_tcpa_window(lead.state, now):

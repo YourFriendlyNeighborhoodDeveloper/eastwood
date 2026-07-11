@@ -55,6 +55,15 @@ class Lead(Base):
     health_data: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     triage_bucket: Mapped[str | None] = mapped_column(String(32))
     triage_priority: Mapped[float | None] = mapped_column(Float)
+    # National DNC Registry clearance. Distinct from the suppressions table,
+    # which records entity-specific DNC. "unknown" is the default and is not
+    # dialable — see domain.compliance.dnc_scrub.
+    national_dnc_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="unknown", server_default="unknown", index=True
+    )
+    national_dnc_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    national_dnc_provider: Mapped[str | None] = mapped_column(String(64))
+    national_dnc_source: Mapped[str | None] = mapped_column(String(128))
     source_batch_id: Mapped[str | None] = mapped_column(String(64), index=True)
     ap_cents: Mapped[int | None] = mapped_column(Integer)  # annual premium in cents when policy written
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

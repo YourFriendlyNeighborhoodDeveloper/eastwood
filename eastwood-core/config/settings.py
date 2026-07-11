@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     # field exists so the guard can see the same value.
     bypass_tcpa: bool = False
 
+    # National DNC Registry scrub. The provider is looked up by name in
+    # domain.compliance.dnc_scrub so no vendor is hardcoded into the dial path.
+    # "local_csv" is a blocklist-only stand-in: it can prove a number is on the
+    # registry, never that it is clear, so on its own it dials nobody.
+    dnc_scrub_provider: str = "local_csv"
+    national_dnc_blocklist_path: str = "data/private/national_dnc_blocked.local.csv"
+
     score_hot_threshold: int = 75
     score_warm_threshold: int = 50
 

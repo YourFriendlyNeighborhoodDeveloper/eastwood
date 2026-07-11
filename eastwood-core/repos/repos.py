@@ -111,6 +111,27 @@ class LeadRepo:
             .values(triage_bucket=bucket, triage_priority=priority, updated_at=datetime.now(timezone.utc))
         )
 
+    async def set_national_dnc(
+        self,
+        lead_id: uuid.UUID,
+        status: str,
+        provider: str | None = None,
+        checked_at: datetime | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Record a National DNC Registry clearance decision and its provenance."""
+        await self._s.execute(
+            update(Lead)
+            .where(Lead.id == lead_id)
+            .values(
+                national_dnc_status=status,
+                national_dnc_provider=provider,
+                national_dnc_checked_at=checked_at,
+                national_dnc_source=source,
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+
     async def update_health_data(self, lead_id: uuid.UUID, health_data: dict) -> None:
         await self._s.execute(
             update(Lead)
