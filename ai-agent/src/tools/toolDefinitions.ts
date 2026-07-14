@@ -8,7 +8,11 @@ export const ALL_TOOLS: ToolDefinition[] = [
   {
     name: "get_quote",
     description:
-      "Generate an insurance quote for the prospect based on their details.",
+      "Generate the real quote options for the prospect. Returns up to three " +
+      "engine-priced options (C, B, A) sized from what the prospect stated. " +
+      "MANDATORY once discovery and health screening are complete — never skip " +
+      "to booking while quoting is possible. Rating sex is read from the " +
+      "captured rating_sex field; it is never passed in or inferred.",
     parameters: {
       type: "object",
       required: ["productLine", "age", "state"],
@@ -28,20 +32,57 @@ export const ALL_TOOLS: ToolDefinition[] = [
         state: { type: "string", minLength: 2, maxLength: 2 },
         faceValue: { type: "integer", minimum: 1000 },
         tobaccoUser: { type: "boolean" },
-        gender: { type: "string", enum: ["male", "female", "not_specified"] },
+      },
+    },
+  },
+  {
+    name: "select_quote_option",
+    description:
+      "Record which of the presented options (C, B, or A) the prospect chose, " +
+      "after asking which one makes the most sense for them. Set " +
+      "affordabilityConfirmed true only after they verbally confirm the monthly " +
+      "amount is comfortable to maintain long term.",
+    parameters: {
+      type: "object",
+      required: ["option"],
+      properties: {
+        option: { type: "string", enum: ["C", "B", "A"] },
+        affordabilityConfirmed: {
+          type: "boolean",
+          description: "True only after the prospect confirms the premium is comfortable long term",
+        },
+      },
+    },
+  },
+  {
+    name: "get_booking_slots",
+    description:
+      "Retrieve real upcoming appointment times from the calendar BEFORE " +
+      "offering any time to the prospect. Offer two or three of the returned " +
+      "times and let them pick. Never invent an available time.",
+    parameters: {
+      type: "object",
+      properties: {
+        timezone: { type: "string", description: "Prospect's IANA timezone, e.g. 'America/Detroit'" },
       },
     },
   },
   {
     name: "book_appointment",
     description:
-      "Book the licensed-agent appointment for the prospect. Only after a quote " +
-      "has been presented. notes carries anything the prospect asked the agent to " +
-      "know before the call.",
+      "Book the licensed-agent appointment. Only after a quote was presented " +
+      "(or quoting genuinely failed). When the prospect picked one of the real " +
+      "times from get_booking_slots, pass it as slotStartTime along with their " +
+      "email (collect it first — the calendar invite needs it). notes carries " +
+      "anything the prospect asked the agent to know before the call.",
     parameters: {
       type: "object",
-      required: ["preferredDate", "preferredTime"],
       properties: {
+        slotStartTime: {
+          type: "string",
+          description: "ISO start time chosen from get_booking_slots results",
+        },
+        email: { type: "string", description: "Prospect's email address, as they stated it" },
         preferredDate: { type: "string", format: "date" },
         preferredTime: { type: "string" },
         timezone: { type: "string", description: "Prospect's timezone, e.g. 'ET', 'America/Detroit'" },

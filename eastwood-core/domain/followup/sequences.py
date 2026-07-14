@@ -46,15 +46,19 @@ SMS_TEMPLATES: dict[str, str] = {
         "I'll give you a call then. Just reply here if anything changes. Reply STOP to opt out."
     ),
 
-    # quoted_not_closed
+    # quoted_not_closed — figures come from the quote persisted on the call,
+    # never re-computed for the SMS. {quote_label} is "estimate" or
+    # "carrier-backed"; {calendly_link} books time with Ryan directly.
     "quoted_followup_day1": (
-        "Hi {first_name}, wanted to follow up on the {carrier} plan we discussed — "
-        "${quote_amount}/month for ${face_value} in coverage. "
-        "Still available if you'd like to move forward. Reply STOP to opt out."
+        "Hi {first_name}, following up on the option we discussed — "
+        "${face_value} in coverage around ${quote_amount}/month ({quote_label}, {carrier}). "
+        "Ryan, our licensed agent, can finalize it: book a time at {calendly_link} "
+        "or reply here for a callback. Reply STOP to opt out."
     ),
     "quoted_followup_day3": (
-        "Hi {first_name}, just checking back in. The {carrier} rate of ${quote_amount}/month "
-        "is still available but rates can change. Happy to answer any questions. Reply STOP to opt out."
+        "Hi {first_name}, just checking back in on the ${face_value} option "
+        "around ${quote_amount}/month ({quote_label}). Grab a time with Ryan at "
+        "{calendly_link} or reply here. Reply STOP to opt out."
     ),
     "quoted_objection_price": (
         "Hi {first_name}, I hear you on the budget. I found an option closer to your range — "

@@ -58,6 +58,30 @@ def _quote_line(profile: dict) -> str:
     return f"{face} at approximately ${premium}/month\n{tail}"
 
 
+def _selected_option_line(profile: dict) -> str:
+    """The option the prospect chose, as '$coverage at $premium/month'."""
+    selected = profile.get("selected_option")
+    if selected:
+        for opt in profile.get("quote_options") or []:
+            if isinstance(opt, dict) and str(opt.get("label", "")).upper() == str(selected).upper():
+                face = _money(opt, "face_value") if opt.get("face_value") is not None else _UNKNOWN
+                premium = opt.get("monthly_premium")
+                p = f"${premium}/month" if premium is not None else _UNKNOWN
+                return f"Option {str(selected).upper()}: {face} at {p}"
+        return f"Option {str(selected).upper()}"
+    premium = profile.get("quoted_monthly_premium")
+    if premium is not None:
+        return f"{_money(profile, 'quote_amount')} at ${premium}/month (none selected)"
+    return "none"
+
+
+def _calendly_line(profile: dict) -> str:
+    status = profile.get("calendly_status")
+    if not status or status == "not_requested":
+        return "not requested"
+    return str(status)
+
+
 def _health_summary(profile: dict) -> str:
     conditions = _val(profile, "health_summary")
     meds = _val(profile, "medications_summary")
@@ -105,6 +129,8 @@ def format_agent_brief(profile: dict) -> str:
         f"Prospect: {_val(profile, 'full_name')}",
         f"Phone: {_val(profile, 'phone_e164')}",
         f"Appointment: {_val(profile, 'appointment_time')}",
+        f"Calendly: {_calendly_line(profile)}",
+        f"Selected option: {_selected_option_line(profile)}",
         "",
         f"Protecting: {beneficiary}",
         f"Purpose: {_val(profile, 'coverage_purpose')}",

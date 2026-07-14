@@ -68,6 +68,7 @@ const FULL_DISCOVERY = {
   [CAPTURE.coveragePurpose]: "burial",
   [CAPTURE.beneficiaryRelationship]: "spouse",
   [CAPTURE.desiredCoverageAmount]: 10_000,
+  [CAPTURE.ratingSex]: "female",
 };
 
 describe("needs discovery gating", () => {
@@ -96,6 +97,24 @@ describe("needs discovery gating", () => {
     assert.ok(deriveAllowedTools(l, session(FULL_DISCOVERY)).includes("get_quote"));
   });
 
+  it("keeps get_quote locked until the rating-sex question was asked", () => {
+    const l = lead();
+    const { [CAPTURE.ratingSex]: _omit, ...withoutRatingSex } = FULL_DISCOVERY;
+    assert.ok(
+      !deriveAllowedTools(l, session(withoutRatingSex)).includes("get_quote"),
+      "rating sex must be asked before quoting",
+    );
+  });
+
+  it("accepts a declined rating sex recorded as unknown — asked, not guessed", () => {
+    const l = lead();
+    const captured = { ...FULL_DISCOVERY, [CAPTURE.ratingSex]: "unknown" };
+    assert.ok(
+      deriveAllowedTools(l, session(captured)).includes("get_quote"),
+      "a declined answer still satisfies the gate",
+    );
+  });
+
   it("accepts a monthly budget in place of a coverage amount", () => {
     const captured = {
       [CAPTURE.coveragePurpose]: "family_protection",
@@ -109,6 +128,28 @@ describe("needs discovery gating", () => {
     // Health agenda still has an outstanding item.
     const l = lead({ acquisitionPlan: [{ field: "tobacco", priority: 2, question: "Tobacco?", captureKey: "tobacco" }] });
     assert.ok(!deriveAllowedTools(l, session(FULL_DISCOVERY)).includes("get_quote"), "health screening not done");
+  });
+
+  it("keeps book_appointment locked while quoting is possible but not yet done", () => {
+    const l = lead();
+    const tools = deriveAllowedTools(l, session(FULL_DISCOVERY));
+    assert.ok(tools.includes("get_quote"), "precondition: quoting is possible");
+    assert.ok(!tools.includes("book_appointment"), "booking may not replace quoting");
+    assert.ok(!tools.includes("get_booking_slots"));
+  });
+
+  it("unlocks honest booking after a quote-service failure", () => {
+    const l = lead();
+    const s = session(FULL_DISCOVERY, { quoteFailureReason: "quote_service_unavailable" } as any);
+    const tools = deriveAllowedTools(l, s);
+    assert.ok(tools.includes("book_appointment"), "manual-quote booking must be possible");
+    assert.ok(tools.includes("get_booking_slots"));
+  });
+
+  it("unlocks booking when the prospect explicitly asks for only an appointment", () => {
+    const l = lead();
+    const s = session({ appointment_only_request: "yes" });
+    assert.ok(deriveAllowedTools(l, s).includes("book_appointment"));
   });
 });
 

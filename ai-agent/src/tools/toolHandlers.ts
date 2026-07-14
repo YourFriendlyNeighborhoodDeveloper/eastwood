@@ -4,9 +4,10 @@ import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 import { loadConfig } from "../config.js";
 import { logger, toolInvocations } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
-import type { AcquisitionTask, LeadContext, ProductLine, SessionState } from "../types.js";
+import type { AcquisitionTask, LeadContext, ProductLine, Quote, QuoteOption, SessionState } from "../types.js";
+import { QuoteOptionSchema } from "../types.js";
 import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
-import { buildProspectProfile, selectFaceAmount } from "../discovery/prospectProfile.js";
+import { CAPTURE, buildProspectProfile, selectFaceAmount } from "../discovery/prospectProfile.js";
 
 const policy = new PolicyEngine();
 
@@ -22,6 +23,87 @@ export function estimatePresentation(monthlyPremium: number): string {
     `Based on what you told me, we may be looking around $${monthlyPremium.toFixed(2)} per month. ` +
     `I'd like to book a licensed review to confirm the exact carrier and final rate.`
   );
+}
+
+const OPTION_FRAMING: Record<string, string> = {
+  C: "This is the basic protection option — it handles the minimum need you described.",
+  B: "This is the balanced option — it covers the need with some room for inflation or extra expenses.",
+  A: "This gives your beneficiary the strongest protection while staying near the budget we discussed.",
+};
+
+function money(n: number): string {
+  return `$${n.toLocaleString("en-US")}`;
+}
+
+/**
+ * The exact lines for presenting the engine's options. Each option is a
+ * specific face amount at a specific premium — never a vague range. Estimates
+ * are said to be estimates with the carrier TBD; only carrier-backed rates may
+ * name their carrier.
+ */
+export function optionsPresentation(options: QuoteOption[]): string[] {
+  const lines: string[] = [
+    options.length > 1
+      ? `Based on what you told me, I found ${options.length === 3 ? "three" : options.length === 2 ? "two" : "a few"} ways to approach it.`
+      : "Based on what you told me, here is the option I found.",
+  ];
+  for (const o of options) {
+    const framing = OPTION_FRAMING[o.label] ?? "";
+    lines.push(
+      `Option ${o.label} is ${money(o.faceValue)} of coverage at approximately $${o.monthlyPremium.toFixed(2)} per month. ${framing}`.trim()
+    );
+  }
+  const anyEstimate = options.some((o) => o.quoteType !== "carrier");
+  if (anyEstimate) {
+    lines.push(
+      "Those figures are estimates — the exact carrier and final rate get confirmed by the licensed agent."
+    );
+  }
+  if (options.length > 1) {
+    lines.push("Which of those feels like the best fit for what you're trying to accomplish?");
+  }
+  return lines;
+}
+
+/** Map an engine option onto the session's Quote record. */
+function optionToQuote(
+  productLine: ProductLine,
+  option: QuoteOption,
+  faceAmountReason: Quote["faceAmountReason"]
+): Quote {
+  return {
+    productLine,
+    faceValue: option.faceValue,
+    monthlyPremium: option.monthlyPremium,
+    carrier: option.carrier ?? undefined,
+    quoteType: option.quoteType,
+    rateSource: option.rateSource,
+    carrierRate: option.carrierRate,
+    bindable: option.bindable,
+    faceAmountReason,
+  };
+}
+
+/**
+ * The appointment time string for the handoff profile — the Calendly slot when
+ * one was booked, otherwise the locally recorded preference.
+ */
+function appointmentTimeString(session: SessionState): string {
+  if (session.calendly?.startTime) {
+    return [session.calendly.startTime, session.calendly.timezone].filter(Boolean).join(" ");
+  }
+  if (session.appointment) {
+    return `${session.appointment.date} ${session.appointment.time}`.trim();
+  }
+  return "";
+}
+
+/** Handoff profile for call_ended — built from captured facts only. */
+export function handoffProfile(session: SessionState, notes?: string): Record<string, unknown> {
+  return buildProspectProfile(session, {
+    appointmentTime: appointmentTimeString(session),
+    followUpNotes: notes,
+  }) as unknown as Record<string, unknown>;
 }
 
 type ToolInput = Record<string, unknown>;
@@ -46,7 +128,6 @@ export const toolHandlers: Record<string, ToolHandler> = {
         state: z.string(),
         faceValue: z.number().int().optional(),
         tobaccoUser: z.boolean().optional(),
-        gender: z.string().optional(),
       })
       .parse(input);
 
@@ -66,6 +147,12 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    // Rating sex is whatever the prospect stated — captured via
+    // update_lead_field, never inferred by the model and never a tool argument.
+    const ratingSexRaw = String(session.captured[CAPTURE.ratingSex] ?? "").trim().toLowerCase();
+    const ratingSex = ratingSexRaw === "male" || ratingSexRaw === "female" ? ratingSexRaw : null;
+
+    const c = session.captured;
     let quoteData: Record<string, unknown>;
     try {
       const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/quote`, {
@@ -77,17 +164,32 @@ export const toolHandlers: Record<string, ToolHandler> = {
           state: parsed.state,
           face_value: faceValue,
           tobacco: parsed.tobaccoUser ?? false,
-          gender: parsed.gender ?? null,
+          gender: ratingSex,
           lead_id: lead.leadId,
           condition_codes: [],
+          // The engine — not the model — sizes the C/B/A faces from these.
+          coverage_purpose: c[CAPTURE.coveragePurpose] ?? null,
+          burial_or_cremation: c[CAPTURE.burialOrCremation] ?? null,
+          desired_coverage_amount: c[CAPTURE.desiredCoverageAmount] ?? null,
+          monthly_budget: c[CAPTURE.monthlyBudget] ?? null,
         }),
       });
       if (!resp.ok) throw new Error(`quote API ${resp.status}`);
       quoteData = (await resp.json()) as Record<string, unknown>;
     } catch (err) {
+      // Honest failure: no premium is invented, the profile is preserved, and
+      // booking/transfer unlock so the licensed agent can quote manually.
       logger.error({ err }, "get_quote HTTP call failed");
+      session.quoteFailureReason = "quote_service_unavailable";
       toolInvocations.inc({ tool_name: "get_quote", outcome: "timeout" });
-      return { error: "Quote service unavailable — please try again in a moment." };
+      return {
+        error:
+          "The quoting service couldn't finish just now. Do NOT state any number " +
+          "or range. Tell the prospect the licensed agent will run exact numbers, " +
+          "and offer to book that appointment or transfer now.",
+        quoteFailed: true,
+        nextStep: "book_appointment",
+      };
     }
 
     const best = quoteData["best"] as Record<string, unknown> | null;
@@ -102,6 +204,95 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const carrierRate = !isEstimate && label("carrier_rate") === true;
     const bindable = !isEstimate && label("bindable") === true;
 
+    // The engine's three options (C, B, A) — deterministic faces and premiums.
+    // Options that fail schema validation or the premium sanity band are dropped.
+    const rawOptions = Array.isArray(quoteData["options"]) ? (quoteData["options"] as unknown[]) : [];
+    const options: QuoteOption[] = [];
+    for (const raw of rawOptions) {
+      const r = raw as Record<string, unknown>;
+      const parsedOpt = QuoteOptionSchema.safeParse({
+        label: r["label"],
+        faceValue: r["face_value"],
+        monthlyPremium: r["monthly_premium"],
+        carrier: r["carrier"] ?? null,
+        quoteType: r["quote_type"] === "carrier" ? "carrier" : "estimated",
+        rateSource: r["rate_source"] ?? "unknown",
+        carrierRate: r["carrier_rate"] === true,
+        bindable: r["bindable"] === true,
+        withinBudget: r["within_budget"] ?? null,
+      });
+      if (!parsedOpt.success) continue;
+      const opt = parsedOpt.data;
+      const sane = policy.evaluateQuote(
+        optionToQuote(parsed.productLine as ProductLine, opt, faceAmountReason)
+      );
+      if (sane.allowed) options.push(opt);
+    }
+
+    if (options.length === 0 && best === null) {
+      session.quoteFailureReason = "no_quotes_available";
+      toolInvocations.inc({ tool_name: "get_quote", outcome: "empty" });
+      return {
+        error:
+          "The quoting service returned no options. Do NOT state any number or " +
+          "range. Offer to book the licensed agent, who will run exact numbers.",
+        quoteFailed: true,
+        nextStep: "book_appointment",
+      };
+    }
+
+    // ── Three-option path ─────────────────────────────────────────────────
+    if (options.length > 0) {
+      // The balanced middle option anchors the session quote until the
+      // prospect chooses; select_quote_option replaces it with their choice.
+      const anchor = options.find((o) => o.label === "B") ?? options[options.length - 1]!;
+      const quote = optionToQuote(parsed.productLine as ProductLine, anchor, faceAmountReason);
+
+      await bridge.publishEvent({
+        eventType: "quote_presented",
+        leadId: lead.leadId,
+        sessionId,
+        quote,
+        options,
+      });
+
+      session.quote = quote;
+      session.quoteOptions = options;
+      session.quoteFailureReason = null;
+
+      actor.send({ type: "QUOTE_READY", quote } as Parameters<typeof actor.send>[0]);
+      toolInvocations.inc({ tool_name: "get_quote", outcome: "success" });
+
+      const anyEstimate = options.some((o) => o.quoteType !== "carrier");
+      const overBudget = options.filter((o) => o.withinBudget === false).map((o) => o.label);
+      return {
+        options: options.map((o) => ({
+          option: o.label,
+          faceValue: o.faceValue,
+          monthlyPremium: o.monthlyPremium,
+          carrier: anyEstimate ? null : o.carrier,
+          quoteType: o.quoteType,
+          withinBudget: o.withinBudget,
+        })),
+        presentation: optionsPresentation(options),
+        disclosure: anyEstimate
+          ? "These premiums are estimates, not carrier rates — carrier is TBD and " +
+            "nothing is approved or guaranteed. Present each option exactly: a " +
+            "specific coverage amount at a specific monthly premium. NEVER give a " +
+            "vague range like '$60 to $80'. Do not name any carrier."
+          : "Carrier-published rates, still subject to underwriting and not bound. " +
+            "Present each option exactly — never a vague range.",
+        overBudgetOptions: overBudget,
+        overBudgetNote: overBudget.length
+          ? `Option(s) ${overBudget.join(", ")} exceed the stated budget — ask permission before recommending them.`
+          : null,
+        nextStep:
+          "Present C, then B, then A. Ask which fits best, call select_quote_option, " +
+          "confirm affordability, then book the appointment.",
+      };
+    }
+
+    // ── Single-quote fallback (engine produced no tiered options) ─────────
     const quote = {
       productLine: parsed.productLine as ProductLine,
       monthlyPremium: (best?.["monthly_premium"] as number) ?? 99.0,
@@ -130,6 +321,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     // Source of truth for tool gating. The machine also receives QUOTE_READY, but
     // it only handles that event in the `quoting` state, which nothing reaches.
     session.quote = quote;
+    session.quoteFailureReason = null;
 
     actor.send({ type: "QUOTE_READY", quote } as Parameters<typeof actor.send>[0]);
     toolInvocations.inc({ tool_name: "get_quote", outcome: "success" });
@@ -175,11 +367,115 @@ export const toolHandlers: Record<string, ToolHandler> = {
     };
   },
 
+  select_quote_option: async (input, { lead, sessionId, bridge, session }) => {
+    const parsed = z
+      .object({
+        option: z.enum(["C", "B", "A"]),
+        affordabilityConfirmed: z.boolean().optional(),
+      })
+      .parse(input);
+
+    const chosen = (session.quoteOptions ?? []).find((o) => o.label === parsed.option);
+    if (!chosen) {
+      toolInvocations.inc({ tool_name: "select_quote_option", outcome: "unknown_option" });
+      const available = (session.quoteOptions ?? []).map((o) => o.label).join(", ") || "none";
+      return { error: `Option ${parsed.option} was not presented. Available options: ${available}.` };
+    }
+
+    session.selectedQuoteOption = parsed.option;
+    if (parsed.affordabilityConfirmed !== undefined) {
+      session.affordabilityConfirmed = parsed.affordabilityConfirmed;
+    }
+    // The chosen option becomes THE quote the booking and handoff carry.
+    session.quote = optionToQuote(
+      session.quote?.productLine ?? "final_expense",
+      chosen,
+      session.quote?.faceAmountReason ?? "prospect_requested"
+    );
+
+    // Audit trail: the selection is a captured fact, persisted like any field.
+    await bridge.publishEvent({
+      eventType: "field_captured",
+      leadId: lead.leadId,
+      sessionId,
+      field: "selected_quote_option",
+      captureKey: "selected_quote_option",
+      value: parsed.option,
+    });
+
+    toolInvocations.inc({ tool_name: "select_quote_option", outcome: "success" });
+    return {
+      selected: parsed.option,
+      faceValue: chosen.faceValue,
+      monthlyPremium: chosen.monthlyPremium,
+      affordabilityConfirmed: session.affordabilityConfirmed,
+      nextStep:
+        session.affordabilityConfirmed
+          ? "Book the licensed-agent appointment."
+          : `Confirm affordability: "And approximately $${chosen.monthlyPremium.toFixed(2)} per month ` +
+            `would be comfortable enough to maintain long term?" Then call select_quote_option ` +
+            `again with affordabilityConfirmed.`,
+    };
+  },
+
+  get_booking_slots: async (input, { sessionId, session }) => {
+    const parsed = z.object({ timezone: z.string().optional() }).parse(input);
+    const cfg = loadConfig();
+
+    const url = new URL(`${cfg.eastwoodCoreBaseUrl}/api/scheduling/availability`);
+    if (parsed.timezone) url.searchParams.set("timezone", parsed.timezone);
+
+    try {
+      const resp = await fetch(url.toString());
+      if (!resp.ok) throw new Error(`availability API ${resp.status}`);
+      const data = (await resp.json()) as {
+        calendly_enabled?: boolean;
+        times?: string[];
+        timezone?: string;
+      };
+      const times = (data.times ?? []).slice(0, 3);
+      session.offeredSlots = times;
+      toolInvocations.inc({ tool_name: "get_booking_slots", outcome: "success" });
+      if (times.length === 0) {
+        return {
+          calendlyEnabled: data.calendly_enabled ?? false,
+          times: [],
+          note:
+            "No live calendar times available. Ask for their preferred day and " +
+            "time and book with preferredDate/preferredTime — do not claim a " +
+            "calendar slot is confirmed.",
+        };
+      }
+      return {
+        calendlyEnabled: true,
+        times,
+        timezone: data.timezone,
+        note:
+          "Offer two or three of these exact times and let the prospect pick. " +
+          "Before booking, collect their email address for the calendar invitation.",
+      };
+    } catch (err) {
+      logger.warn({ err, sessionId }, "get_booking_slots failed");
+      session.offeredSlots = [];
+      toolInvocations.inc({ tool_name: "get_booking_slots", outcome: "error" });
+      return {
+        calendlyEnabled: false,
+        times: [],
+        note:
+          "Scheduling calendar unavailable. Ask for their preferred day and time " +
+          "and book with preferredDate/preferredTime — do not claim a calendar " +
+          "slot is confirmed.",
+      };
+    }
+  },
+
   book_appointment: async (input, { lead, sessionId, actor, session }) => {
     const parsed = z
       .object({
-        preferredDate: z.string(),
-        preferredTime: z.string(),
+        slotStartTime: z.string().optional(),
+        email: z.string().optional(),
+        preferredDate: z.string().optional(),
+        preferredTime: z.string().optional(),
         timezone: z.string().optional(),
         notes: z.string().optional(),
       })
@@ -198,22 +494,61 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    if (!parsed.slotStartTime && !parsed.preferredDate) {
+      return { booked: false, error: "Need a chosen slot (slotStartTime) or a preferredDate." };
+    }
+
+    // A Calendly slot must be one of the times actually retrieved and offered —
+    // an invented time is never booked.
+    if (parsed.slotStartTime) {
+      if (session.offeredSlots.length === 0) {
+        toolInvocations.inc({ tool_name: "book_appointment", outcome: "no_availability" });
+        return {
+          booked: false,
+          error: "Call get_booking_slots first — only real availability can be offered and booked.",
+        };
+      }
+      if (!session.offeredSlots.includes(parsed.slotStartTime)) {
+        toolInvocations.inc({ tool_name: "book_appointment", outcome: "slot_not_offered" });
+        return {
+          booked: false,
+          error: `That time was not in the offered availability. Offered: ${session.offeredSlots.join(", ")}`,
+        };
+      }
+      // The calendar invitation needs the prospect's email — collect it before
+      // booking, never invent one.
+      const email = parsed.email?.trim() || String(session.captured[CAPTURE.prospectEmail] ?? "").trim();
+      if (!email) {
+        toolInvocations.inc({ tool_name: "book_appointment", outcome: "needs_email" });
+        return {
+          booked: false,
+          needsEmail: true,
+          error:
+            "I need the prospect's email address for the calendar invitation. Ask " +
+            "for it, record it with update_lead_field (captureKey prospect_email), " +
+            "then book again.",
+        };
+      }
+      session.captured[CAPTURE.prospectEmail] = email;
+    }
+
     const cfg = loadConfig();
 
     // Assemble the handoff profile from captured facts before we write, so a
     // successful appointment carries Ryan's brief. Never model-authored.
-    const appointmentTime = [parsed.preferredDate, parsed.preferredTime, parsed.timezone]
-      .filter(Boolean)
-      .join(" ");
+    const appointmentTime = parsed.slotStartTime
+      ? [parsed.slotStartTime, parsed.timezone].filter(Boolean).join(" ")
+      : [parsed.preferredDate, parsed.preferredTime, parsed.timezone].filter(Boolean).join(" ");
     const profile = buildProspectProfile(session, {
       appointmentTime,
       followUpNotes: parsed.notes,
     });
 
     // eastwood-core is the single source of truth: POST /api/appointments writes
-    // the row, persists the profile, and sends Ryan the brief. The agent must
-    // NOT publish appointment_booked itself.
-    let appointmentId: string;
+    // the row, books the Calendly slot when one was chosen, persists the
+    // profile, and sends Ryan the brief. The agent must NOT publish
+    // appointment_booked itself.
+    let data: Record<string, unknown>;
     try {
       const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/appointments`, {
         method: "POST",
@@ -223,14 +558,16 @@ export const toolHandlers: Record<string, ToolHandler> = {
           session_id: sessionId,
           preferred_date: parsed.preferredDate,
           preferred_time: parsed.preferredTime,
+          start_time: parsed.slotStartTime,
+          email: parsed.email?.trim() || (session.captured[CAPTURE.prospectEmail] as string | undefined),
           timezone: parsed.timezone,
           notes: parsed.notes,
+          selected_option: session.selectedQuoteOption,
           prospect_profile: profile,
         }),
       });
       if (!resp.ok) throw new Error(`appointments API ${resp.status}`);
-      const data = (await resp.json()) as Record<string, unknown>;
-      appointmentId = String(data["appointment_id"] ?? "");
+      data = (await resp.json()) as Record<string, unknown>;
     } catch (err) {
       // Never tell the prospect they are booked when nothing was written.
       logger.error({ err, sessionId }, "book_appointment failed");
@@ -241,17 +578,55 @@ export const toolHandlers: Record<string, ToolHandler> = {
       };
     }
 
+    const appointmentId = String(data["appointment_id"] ?? "");
+    const calendlyStatus = String(data["calendly_status"] ?? "not_requested");
+    const date = String(data["date"] ?? parsed.preferredDate ?? "");
+    const time = String(data["time"] ?? parsed.preferredTime ?? "");
+
     session.appointmentBooked = true;
-    session.appointment = { appointmentId, date: parsed.preferredDate, time: parsed.preferredTime };
+    session.appointment = { appointmentId, date, time };
+    session.calendly = {
+      status: (["confirmed", "failed"].includes(calendlyStatus) ? calendlyStatus : "not_requested") as
+        | "confirmed"
+        | "failed"
+        | "not_requested",
+      eventUri: (data["calendly_event_uri"] as string | null) ?? null,
+      inviteeUri: (data["calendly_invitee_uri"] as string | null) ?? null,
+      startTime: parsed.slotStartTime ?? null,
+      timezone: (data["timezone"] as string | null) ?? parsed.timezone ?? null,
+      cancelUrl: (data["calendly_cancel_url"] as string | null) ?? null,
+      rescheduleUrl: (data["calendly_reschedule_url"] as string | null) ?? null,
+    };
     actor.send({ type: "WRAP_UP" });
     toolInvocations.inc({ tool_name: "book_appointment", outcome: "success" });
+
+    if (calendlyStatus === "failed") {
+      // The request is recorded and Ryan will get the requested time, but the
+      // calendar booking did NOT complete — the prospect must not be told the
+      // appointment is confirmed.
+      return {
+        booked: true,
+        appointmentId,
+        date,
+        time,
+        calendlyStatus,
+        message:
+          "The calendar system couldn't finalize that slot, so it is NOT confirmed " +
+          "yet. Tell the prospect: the request is in and our licensed agent will " +
+          "reach out to confirm the exact time. Never present this as a done deal.",
+      };
+    }
 
     return {
       booked: true,
       appointmentId,
-      date: parsed.preferredDate,
-      time: parsed.preferredTime,
-      message: `Your appointment is confirmed for ${parsed.preferredDate} at ${parsed.preferredTime}. You'll receive a confirmation text shortly.`,
+      date,
+      time,
+      calendlyStatus,
+      message:
+        calendlyStatus === "confirmed"
+          ? `Your appointment is confirmed for ${date} at ${time}. A calendar invitation is on its way to your email.`
+          : `Your appointment is confirmed for ${date} at ${time}. You'll receive a confirmation text shortly.`,
     };
   },
 
@@ -423,12 +798,26 @@ export const toolHandlers: Record<string, ToolHandler> = {
       }
       outcome = "dnc";
     }
+    // A quote-service failure that never recovered is its own outcome — Ryan
+    // needs to know a manual quote is owed. The model's explicit outcome
+    // (callback, not_interested, appointment_set) still wins when it gave one.
+    if (
+      session.quoteFailureReason &&
+      session.quote === null &&
+      !session.dncCaptured &&
+      (!outcome || outcome === "other")
+    ) {
+      outcome = "quote_failed";
+    }
 
+    // Every connected call carries its full handoff profile — this drives the
+    // outcome SMS to Ryan in eastwood-core. Captured facts only.
     await bridge.publishEvent({
       eventType: "call_ended",
       leadId: lead.leadId,
       sessionId,
       outcome,
+      prospectProfile: handoffProfile(session, parsed.notes),
     });
     // Suppress the hangup-path call_ended that endSession would otherwise emit
     // when the telephony stream closes a moment later.

@@ -97,10 +97,30 @@ class Settings(BaseSettings):
     # Set RYAN_PHONE_NUMBER=+1XXXXXXXXXX to enable.
     ryan_phone_number: str = ""
 
-    # Appointment handoff: where the licensed agent receives the prospect brief
-    # when an appointment books. If unset, booking still succeeds — the brief is
-    # skipped with a warning, and the full profile remains retrievable from the DB.
-    agent_notification_phone_e164: str = ""
+    # Agent notifications: Ryan receives every call-outcome SMS and every
+    # appointment brief here. Business logic must read this setting — the number
+    # is configured in exactly one place. If cleared, sends are skipped with a
+    # warning and the full profile remains retrievable from the DB.
+    agent_notification_phone_e164: str = "+13135550199"
+
+    # ── Calendly scheduling ──────────────────────────────────────────────────
+    # When enabled, appointments are booked against Ryan's real Calendly event
+    # type: availability is fetched before offering times, and the selected slot
+    # is created through the Scheduling API. When disabled or unavailable the
+    # profile is still preserved and the requested time reaches Ryan — but the
+    # prospect is never told a Calendly booking is confirmed when it is not.
+    calendly_enabled: bool = False
+    calendly_access_token: str = ""
+    calendly_event_type_url: str = "https://calendly.com/abraxastechnologies/30min"
+    # Resolved API URI for the event type (cached; looked up from the URL when blank).
+    calendly_event_type_uri: str = ""
+    calendly_default_timezone: str = "America/Detroit"
+
+    # ── Quote option limits ──────────────────────────────────────────────────
+    # Product face-amount bounds for the three-option (C/B/A) quote builder.
+    # Option faces are always clamped inside these limits.
+    quote_min_face_dollars: int = 5_000
+    quote_max_face_dollars: int = 50_000
 
     # Autonomous dialer controls
     max_concurrent_calls: int = 3        # hard cap on simultaneous outbound calls

@@ -130,6 +130,19 @@ class Appointment(Base):
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="scheduled")
     notes: Mapped[str | None] = mapped_column(Text)
+    # Calendly booking record. calendly_status is "not_requested" for a plain
+    # local booking, "confirmed" only when Calendly created the invitee, and
+    # "failed" when Calendly was wanted but could not book — the prospect is
+    # never told a failed booking is confirmed.
+    prospect_email: Mapped[str | None] = mapped_column(String(256))
+    timezone: Mapped[str | None] = mapped_column(String(64))
+    calendly_event_uri: Mapped[str | None] = mapped_column(Text)
+    calendly_invitee_uri: Mapped[str | None] = mapped_column(Text)
+    calendly_cancel_url: Mapped[str | None] = mapped_column(Text)
+    calendly_reschedule_url: Mapped[str | None] = mapped_column(Text)
+    calendly_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="not_requested", server_default="not_requested"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     slot: Mapped[BookingSlot] = relationship("BookingSlot", back_populates="appointments")

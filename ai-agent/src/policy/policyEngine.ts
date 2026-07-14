@@ -9,6 +9,12 @@ const MEDICARE_GOVT_RE =
 const PII_READBACK_RE =
   /\b(\d{3}-?\d{2}-?\d{4}|SSN|social\s+security\s+number|bank\s+account|routing\s+number)\b/i;
 
+// A premium-sized dollar range: "$60 to $80", "$60-$80", "between $60 and $80".
+// Both figures under $1,000 so legitimate coverage-amount spans ($10,000 vs
+// $25,000 options) are not caught — the rule targets vague premium talk.
+const VAGUE_PREMIUM_RANGE_RE =
+  /\$\s?\d{1,3}(?:\.\d{1,2})?\s*(?:to|-|–|—|and)\s*\$?\s?\d{1,3}(?:\.\d{1,2})?\b/i;
+
 const PREMIUM_PER_1K_FACE_BAND: Record<string, [number, number]> = {
   final_expense: [3, 35],
   life: [0.5, 10],
@@ -16,7 +22,16 @@ const PREMIUM_PER_1K_FACE_BAND: Record<string, [number, number]> = {
 };
 
 export class PolicyEngine {
-  evaluateUtterance(text: string): PolicyDecision {
+  evaluateUtterance(text: string, opts: { hasExactQuote?: boolean } = {}): PolicyDecision {
+    // Exact engine-priced options exist: each is a specific coverage amount at
+    // a specific premium. A vague range in their place defeats the quote.
+    if (opts.hasExactQuote && VAGUE_PREMIUM_RANGE_RE.test(text)) {
+      return {
+        allowed: false,
+        reason: "vague_range_with_exact_quote",
+        severity: "block",
+      };
+    }
     if (MISLEADING_GUARANTEE_RE.test(text)) {
       return {
         allowed: false,

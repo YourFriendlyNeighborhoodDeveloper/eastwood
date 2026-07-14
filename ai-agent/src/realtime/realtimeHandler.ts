@@ -19,8 +19,8 @@ import { buildSystemPrompt } from "../prompts/buildSystemPrompt.js";
 import { salesMachine } from "../machine/salesMachine.js";
 import { filterToolsByAllowed } from "../tools/toolDefinitions.js";
 import { deriveAllowedTools } from "../tools/toolGating.js";
-import { toolHandlers } from "../tools/toolHandlers.js";
-import type { LeadContext, Quote } from "../types.js";
+import { handoffProfile, toolHandlers } from "../tools/toolHandlers.js";
+import type { CalendlyState, LeadContext, Quote, QuoteOption } from "../types.js";
 import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 
 const policy = new PolicyEngine();
@@ -31,6 +31,15 @@ interface ActiveSession {
   actor: Actor<typeof salesMachine>;
   /** Set by the get_quote tool. Drives which closing tools are exposed. */
   quote: Quote | null;
+  /** The three engine-priced options (C/B/A) once get_quote succeeds. */
+  quoteOptions: QuoteOption[] | null;
+  selectedQuoteOption: string | null;
+  affordabilityConfirmed: boolean | null;
+  /** Set when get_quote failed, unlocking an honest manual-quote booking. */
+  quoteFailureReason: string | null;
+  /** Real availability retrieved before any time was offered. */
+  offeredSlots: string[];
+  calendly: CalendlyState | null;
   appointmentBooked: boolean;
   /** Captured field values (captureKey → value), source of the handoff profile. */
   captured: Record<string, unknown>;
@@ -98,6 +107,12 @@ export class RealtimeHandler {
       lead,
       actor,
       quote: null,
+      quoteOptions: null,
+      selectedQuoteOption: null,
+      affordabilityConfirmed: null,
+      quoteFailureReason: null,
+      offeredSlots: [],
+      calendly: null,
       appointmentBooked: false,
       captured: {},
       objections: [],
@@ -281,7 +296,11 @@ export class RealtimeHandler {
     } else if (type === "response.audio_transcript.delta") {
       const delta = msg["delta"] as string | undefined;
       if (delta) {
-        const check = policy.evaluateUtterance(delta);
+        // With exact options on the table, a vague premium range ("$60 to $80")
+        // is a policy violation — the engine's specific numbers must be spoken.
+        const check = policy.evaluateUtterance(delta, {
+          hasExactQuote: (session.quoteOptions?.length ?? 0) > 0,
+        });
         if (!check.allowed) {
           logger.warn({ reason: check.reason, sessionId: session.sessionId }, "policy abort streaming");
           session.openaiWs?.send(JSON.stringify({ type: "response.cancel" }));
@@ -383,6 +402,7 @@ export class RealtimeHandler {
     if (session.dncCaptured) return "dnc";
     if (session.appointmentBooked) return "appointment_set";
     if (session.quote) return "quoted_not_closed";
+    if (session.quoteFailureReason) return "quote_failed";
     return "hangup";
   }
 
@@ -408,12 +428,17 @@ export class RealtimeHandler {
     if (session.telephonyBound && !session.callEndedPublished) {
       session.callEndedPublished = true;
       try {
+        // The connected call's handoff profile rides along — captured facts
+        // only, driving Ryan's outcome SMS. A call that never bound telephony
+        // publishes nothing, so no profile is ever fabricated for a call that
+        // did not happen.
         await this.bridge.publishEvent({
           eventType: "call_ended",
           leadId: session.lead.leadId,
           sessionId,
           outcome: this.hangupOutcome(session),
           durationSeconds: Math.round((Date.now() - session.startedAt) / 1000),
+          prospectProfile: handoffProfile(session),
         });
       } catch (err) {
         logger.error({ err, sessionId }, "failed to publish call_ended on session end");

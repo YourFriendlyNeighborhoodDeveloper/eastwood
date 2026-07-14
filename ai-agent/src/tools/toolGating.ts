@@ -1,5 +1,5 @@
 import type { AcquisitionTask, LeadContext, SessionState } from "../types.js";
-import { quoteUnlocked, tier1HealthComplete } from "../discovery/prospectProfile.js";
+import { bookingUnlocked, quoteUnlocked, tier1HealthComplete } from "../discovery/prospectProfile.js";
 
 /**
  * Derives which tools the model may call, from what we actually know about the
@@ -49,13 +49,11 @@ export function deriveAllowedTools(
 
   const allowed = new Set<string>(ALWAYS_ALLOWED);
 
-  // Recording captured answers stays available through the whole
-  // discovery/selling phase: before a quote there is always more to learn
-  // (needs discovery, health), and after a quote optional agenda items may
-  // remain. Only once a quote exists and the agenda is empty does it drop off.
-  if (session.quote === null || (lead.acquisitionPlan?.length ?? 0) > 0) {
-    allowed.add("update_lead_field");
-  }
+  // Recording captured answers stays available for the whole call: before a
+  // quote there is always more to learn (needs discovery, health), and after a
+  // quote the booking flow still captures facts — the prospect's email for
+  // Calendly, an explicit appointment-only request, late corrections.
+  allowed.add("update_lead_field");
 
   // Follow-ups become available once health screening is done, so a condition
   // confirmed late in the call can still pull its Tier-2 questions onto the agenda.
@@ -64,13 +62,22 @@ export function deriveAllowedTools(
   }
 
   // A quote requires the minimum needs-discovery profile (purpose, beneficiary,
-  // and an amount or budget) on top of completed health screening — so Imogen
-  // cannot price before she knows what she is pricing, or for whom.
+  // and an amount or budget), rating sex asked, and completed health screening —
+  // so Imogen cannot price before she knows what she is pricing, or for whom.
   if (quoteUnlocked(lead, session)) {
     allowed.add("get_quote");
   }
 
-  if (session.quote !== null) {
+  // The prospect can only choose between options that were actually presented.
+  if ((session.quoteOptions?.length ?? 0) > 0) {
+    allowed.add("select_quote_option");
+  }
+
+  // Booking may not replace quoting: it unlocks once a quote exists, or once
+  // quoting honestly failed (manual quote at the appointment), or the prospect
+  // explicitly asked for an appointment without pricing. Never before.
+  if (bookingUnlocked(session)) {
+    allowed.add("get_booking_slots");
     allowed.add("book_appointment");
     allowed.add("transfer_live");
     allowed.add("transfer_to_human");

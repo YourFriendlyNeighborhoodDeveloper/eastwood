@@ -3,6 +3,7 @@ from .manager import QuoteManager
 from .adapters.cms_medicare import CmsMedicareAdapter
 from .adapters.rate_table import RateTableAdapter
 from .adapters.formula import FormulaAdapter
+from .options import QuoteOption, build_quote_options, select_face_targets
 
 __all__ = [
     "CarrierQuote",
@@ -13,4 +14,7 @@ __all__ = [
     "CmsMedicareAdapter",
     "RateTableAdapter",
     "FormulaAdapter",
+    "QuoteOption",
+    "build_quote_options",
+    "select_face_targets",
 ]

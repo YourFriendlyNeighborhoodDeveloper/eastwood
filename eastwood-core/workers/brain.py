@@ -66,6 +66,12 @@ class WorkersBrain:
         self._ai_agent = AiAgentClient()
         self._sms = SmsClient() if self._settings.twilio_account_sid else None
         self._dnc_scrub = get_scrub_provider(self._settings)
+        # One outcome SMS to Ryan per connected call. Destination comes from
+        # settings — never hardcoded into handlers.
+        from domain.notifications import CallOutcomeNotificationService
+        self._outcome_notifier = CallOutcomeNotificationService(
+            self._sms, self._settings.agent_notification_phone_e164
+        )
 
     async def _ensure_national_dnc_status(self, session, lead: Any) -> str:
         """Resolve a lead's National DNC clearance, scrubbing if still undecided.
@@ -336,6 +342,11 @@ class WorkersBrain:
         lead_id = uuid.UUID(lead_id_str)
         session_id = msg.get("sessionId") or msg.get("session_id")
 
+        # Set by the call_ended branch; the outcome SMS sends only after the
+        # session_scope block commits the profile write.
+        outcome_profile: dict | None = None
+        outcome_value: str | None = None
+
         async with session_scope() as session:
             if event_type == "quote_presented":
                 quote_repo = QuoteRepo(session)
@@ -441,6 +452,34 @@ class WorkersBrain:
                         outcome=outcome,
                         duration=msg.get("durationSeconds") or msg.get("duration_seconds"),
                     )
+
+                # The agent attaches the full ProspectProfile it assembled from
+                # captured facts to every connected call's call_ended. Persist it
+                # as the canonical record (once per session), then — after this
+                # transaction commits — send Ryan the one outcome SMS. A call
+                # that never connected publishes no call_ended and therefore
+                # fabricates no profile and sends nothing.
+                profile = msg.get("prospectProfile") or msg.get("prospect_profile")
+                if isinstance(profile, dict) and profile:
+                    from sqlalchemy import select as _sel
+                    from db.models import HandoffProfile as _HP
+                    existing = None
+                    if session_id:
+                        row = await session.execute(
+                            _sel(_HP).where(_HP.session_id == session_id, _HP.appointment_id.is_(None))
+                        )
+                        existing = row.scalars().first()
+                    if existing is None:
+                        session.add(_HP(
+                            lead_id=lead_id,
+                            appointment_id=None,
+                            tenant_id=msg.get("tenantId") or self._settings.default_tenant_id,
+                            session_id=session_id,
+                            profile=profile,
+                        ))
+                    outcome_profile = profile
+                    outcome_value = outcome
+
                 # Schedule follow-up sequence based on outcome
                 if outcome:
                     lead_repo = LeadRepo(session)
@@ -448,20 +487,12 @@ class WorkersBrain:
                     lead = await lead_repo.get_by_id(lead_id)
                     if lead:
                         from domain.followup import schedule_for_outcome
-                        quote_amount = msg.get("quoteAmount") or msg.get("quote_amount")
-                        carrier = msg.get("carrier") or (lead.health_data or {}).get("placed_carrier")
+                        context = self._followup_context(lead, msg, profile if isinstance(profile, dict) else None)
                         await schedule_for_outcome(
                             lead_id=lead_id,
                             tenant_id=self._settings.default_tenant_id,
                             outcome=outcome,
-                            context_data={
-                                "first_name":    lead.first_name or "there",
-                                "quote_amount":  quote_amount,
-                                "face_value":    msg.get("faceValue") or msg.get("face_value"),
-                                "carrier":       carrier or "our top carrier",
-                                "callback_window": msg.get("callbackWindow", "tomorrow"),
-                                "last_objection": msg.get("lastObjection"),
-                            },
+                            context_data=context,
                             followup_repo=followup_repo,
                         )
 
@@ -525,6 +556,58 @@ class WorkersBrain:
                             call_id=call_id,
                         )
                         logger.info("captured field=%s for lead %s", field, lead_id)
+
+        # Outside the transaction: the profile write has committed, so the alert
+        # can never describe a record that failed to persist. Fail-soft and
+        # deduplicated per session inside the notifier.
+        if outcome_profile is not None:
+            try:
+                self._outcome_notifier.send_outcome(
+                    outcome_profile, session_id=session_id, outcome=outcome_value
+                )
+            except Exception:
+                logger.exception("outcome SMS failed for session %s", session_id)
+
+    def _followup_context(self, lead: Any, msg: dict, profile: dict | None) -> dict:
+        """Follow-up template context. Quote figures come ONLY from the quote
+        actually presented on the call (the persisted profile) — an SMS
+        follow-up never invents a new quote."""
+        quote_amount = None
+        face_value = None
+        carrier = None
+        quote_label = None
+        if profile:
+            options = [o for o in (profile.get("quote_options") or []) if isinstance(o, dict)]
+            selected = profile.get("selected_option")
+            chosen = next(
+                (o for o in options if str(o.get("label", "")).upper() == str(selected or "").upper()),
+                None,
+            ) or next((o for o in options if str(o.get("label", "")).upper() == "B"), None) \
+              or (options[0] if options else None)
+            if chosen:
+                quote_amount = chosen.get("monthly_premium")
+                face_value = chosen.get("face_value")
+                quote_label = "carrier-backed" if chosen.get("quote_type") == "carrier" else "estimate"
+            else:
+                quote_amount = profile.get("quoted_monthly_premium")
+                face_value = profile.get("quote_amount")
+                if quote_amount is not None:
+                    quote_label = "carrier-backed" if profile.get("quote_type") == "carrier" else "estimate"
+            carrier = profile.get("carrier_name")
+        if quote_amount is None:
+            quote_amount = msg.get("quoteAmount") or msg.get("quote_amount")
+            face_value = face_value or msg.get("faceValue") or msg.get("face_value")
+        return {
+            "first_name":      lead.first_name or "there",
+            "quote_amount":    quote_amount,
+            "face_value":      face_value,
+            "quote_label":     quote_label or "estimate",
+            "carrier":         carrier or msg.get("carrier")
+                               or (lead.health_data or {}).get("placed_carrier") or "carrier TBD",
+            "calendly_link":   self._settings.calendly_event_type_url,
+            "callback_window": msg.get("callbackWindow", "tomorrow"),
+            "last_objection":  msg.get("lastObjection"),
+        }
 
     async def enqueue_call(self, lead: Any, tenant_id: str, priority: float = 0.0) -> None:
         """Add a lead to the dial queue for autonomous dialing. Called by score_and_route.

@@ -22,6 +22,13 @@ export const CAPTURE = {
   conditions: "conditions",
   medications: "current_meds",
   tobacco: "tobacco",
+  // Rating and contact facts. rating_sex is ASKED ("for rating purposes, are
+  // you male or female?") and stored verbatim — never inferred from name,
+  // voice, or pronouns. "unknown" when the prospect declines.
+  ratingSex: "rating_sex",
+  employmentStatus: "employment_status",
+  heightWeight: "height_weight",
+  prospectEmail: "prospect_email",
 } as const;
 
 /** Tier-1 health agenda fields. When none remain on the plan, screening is done. */
@@ -67,9 +74,32 @@ export function minimumDiscoveryCaptured(session: SessionState): boolean {
   return purpose && beneficiary && target;
 }
 
-/** get_quote unlocks only after Tier-1 health AND the minimum discovery profile. */
+/**
+ * Rating sex must have been ASKED before quoting. A declined answer is captured
+ * as "unknown" and still satisfies the gate — the quote proceeds and the
+ * licensed agent confirms exact pricing. What can never satisfy it is a guess:
+ * the value only ever comes from update_lead_field, never from the model's
+ * judgment of a name or a voice.
+ */
+export function ratingSexCaptured(session: SessionState): boolean {
+  return has(session.captured, CAPTURE.ratingSex);
+}
+
+/** get_quote unlocks only after Tier-1 health, minimum discovery, AND rating sex was asked. */
 export function quoteUnlocked(lead: LeadContext, session: SessionState): boolean {
-  return tier1HealthComplete(lead) && minimumDiscoveryCaptured(session);
+  return tier1HealthComplete(lead) && minimumDiscoveryCaptured(session) && ratingSexCaptured(session);
+}
+
+/**
+ * Booking may replace quoting ONLY when quoting genuinely cannot happen:
+ * the quote service failed (quoteFailureReason set) or the prospect explicitly
+ * asked for an appointment without pricing (captured appointment_only_request).
+ * While quoting is possible and not yet done, booking stays locked.
+ */
+export function bookingUnlocked(session: SessionState): boolean {
+  if (session.quote) return true;
+  if (session.quoteFailureReason) return true;
+  return has(session.captured, "appointment_only_request");
 }
 
 // ── Face-amount selection ─────────────────────────────────────────────────────
@@ -160,12 +190,23 @@ function callSummary(session: SessionState, profile: ProspectProfile): string {
   if (profile.beneficiary_relationship !== UNKNOWN) parts.push(`to protect their ${profile.beneficiary_relationship}`);
   if (profile.desired_coverage_amount) parts.push(`wants about $${profile.desired_coverage_amount.toLocaleString()}`);
   else if (profile.monthly_budget) parts.push(`aiming for about $${profile.monthly_budget}/mo`);
-  if (profile.quoted_monthly_premium) {
+  if (profile.quote_options.length > 0) {
+    parts.push(`presented ${profile.quote_options.length} option(s)`);
+    if (profile.selected_option) parts.push(`chose Option ${profile.selected_option}`);
+  } else if (profile.quoted_monthly_premium) {
     const kind = profile.carrier_name ? profile.carrier_name : "an estimate";
     parts.push(`quoted ~$${profile.quoted_monthly_premium}/mo (${kind})`);
   }
+  if (profile.quote_failure_reason) parts.push("quote service failed — manual quote needed");
   if (session.appointment) parts.push("appointment booked");
   return parts.length ? parts.join("; ") + "." : UNKNOWN;
+}
+
+/** Normalise a captured rating sex to the only values the record may hold. */
+function ratingSexValue(session: SessionState): string {
+  const v = String(session.captured[CAPTURE.ratingSex] ?? "").trim().toLowerCase();
+  if (v === "male" || v === "female") return v;
+  return UNKNOWN;
 }
 
 export function buildProspectProfile(
@@ -176,6 +217,7 @@ export function buildProspectProfile(
   const c = session.captured;
   const quote = session.quote;
   const name = [lead.firstName, lead.lastName].filter(Boolean).join(" ").trim();
+  const options = session.quoteOptions ?? [];
 
   const profile: ProspectProfile = {
     lead_id: lead.leadId,
@@ -184,6 +226,10 @@ export function buildProspectProfile(
     age: lead.age ?? null,
     date_of_birth: str(c["dob"]),
     state: lead.state ?? UNKNOWN,
+    rating_sex: ratingSexValue(session),
+    employment_status: str(c[CAPTURE.employmentStatus]),
+    height_weight: str(c[CAPTURE.heightWeight]),
+    prospect_email: str(c[CAPTURE.prospectEmail]),
     coverage_purpose: str(c[CAPTURE.coveragePurpose]),
     burial_or_cremation_preference: str(c[CAPTURE.burialOrCremation]),
     beneficiary_name: str(c[CAPTURE.beneficiaryName]),
@@ -200,9 +246,23 @@ export function buildProspectProfile(
     quote_amount: quote?.faceValue ?? null,
     quoted_monthly_premium: quote?.monthlyPremium ?? null,
     quote_type: quote?.quoteType ?? UNKNOWN,
+    quote_source: quote ? (quote.quoteType === "carrier" ? "carrier-backed" : "estimate") : UNKNOWN,
     face_amount_reason: quote?.faceAmountReason ?? UNKNOWN,
     carrier_name: quote?.carrierRate ? quote.carrier ?? null : null,
+    quote_options: options.map((o) => ({
+      label: o.label,
+      face_value: o.faceValue,
+      monthly_premium: o.monthlyPremium,
+      carrier: o.carrierRate ? o.carrier : null,
+      quote_type: o.quoteType,
+      within_budget: o.withinBudget,
+    })),
+    selected_option: session.selectedQuoteOption,
+    affordability_confirmed: session.affordabilityConfirmed,
+    quote_failure_reason: session.quoteFailureReason,
+    calendly_status: session.calendly?.status ?? "not_requested",
     appointment_time: opts.appointmentTime || UNKNOWN,
+    appointment_timezone: session.calendly?.timezone ?? UNKNOWN,
     objections: session.objections,
     consent_status: lead.consentStatus ?? UNKNOWN,
     follow_up_notes: opts.followUpNotes?.trim() || UNKNOWN,

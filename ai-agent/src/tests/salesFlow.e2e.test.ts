@@ -246,10 +246,12 @@ async function waitFor(predicate: () => boolean, label: string, timeoutMs = 2000
 
 /** Capture the minimum needs-discovery profile plus Tier-1 health so get_quote unlocks. */
 async function completeDiscovery(socket: FakeOpenAiSocket): Promise<void> {
-  // Needs discovery: purpose, beneficiary, and a requested amount.
+  // Needs discovery: purpose, beneficiary, a requested amount, and rating sex
+  // (asked, never inferred).
   await callTool(socket, "update_lead_field", { field: "coverage_purpose", captureKey: "coverage_purpose", value: "burial" });
   await callTool(socket, "update_lead_field", { field: "beneficiary", captureKey: "beneficiary_relationship", value: "spouse" });
   await callTool(socket, "update_lead_field", { field: "coverage_target", captureKey: "desired_coverage_amount", value: 10_000 });
+  await callTool(socket, "update_lead_field", { field: "rating_sex", captureKey: "rating_sex", value: "female" });
   // Tier-1 health (empties the agenda).
   await callTool(socket, "update_lead_field", { field: "age", captureKey: "age", value: 68 });
   await callTool(socket, "update_lead_field", { field: "tobacco", captureKey: "tobacco", value: "none" });
@@ -333,9 +335,15 @@ describe("sales flow end-to-end", () => {
 
     await callTool(socket, "update_lead_field", { field: "coverage_target", captureKey: "desired_coverage_amount", value: 10_000 });
 
+    // Amount present, but rating sex was never asked — still locked.
+    tools = socket.currentTools();
+    assert.ok(!tools.includes("get_quote"), "no quote until rating sex was asked");
+
+    await callTool(socket, "update_lead_field", { field: "rating_sex", captureKey: "rating_sex", value: "female" });
+
     // ── minimum discovery complete: quoting unlocks ───────────────────────
     tools = socket.currentTools();
-    assert.ok(tools.includes("get_quote"), "purpose + beneficiary + amount unlocks get_quote");
+    assert.ok(tools.includes("get_quote"), "purpose + beneficiary + amount + rating sex unlocks get_quote");
     assert.ok(!tools.includes("book_appointment"), "no booking until a quote exists");
 
     // ── quote ─────────────────────────────────────────────────────────────
@@ -371,9 +379,11 @@ describe("sales flow end-to-end", () => {
     assert.equal(ended["outcome"], "appointment_set");
 
     assert.deepEqual(bridge.eventTypes(), [
-      // 8 captures: purpose, beneficiary, age, tobacco, conditions, meds, height, amount
+      // 9 captures: purpose, beneficiary, age, tobacco, conditions, meds,
+      // height, amount, rating_sex
       "field_captured", "field_captured", "field_captured", "field_captured",
       "field_captured", "field_captured", "field_captured", "field_captured",
+      "field_captured",
       "quote_presented",
       "call_ended",
     ]);
@@ -390,6 +400,7 @@ describe("sales flow end-to-end", () => {
     await callTool(socket, "update_lead_field", { field: "coverage_purpose", captureKey: "coverage_purpose", value: "burial" });
     await callTool(socket, "update_lead_field", { field: "beneficiary", captureKey: "beneficiary_relationship", value: "daughter" });
     await callTool(socket, "update_lead_field", { field: "coverage_target", captureKey: "desired_coverage_amount", value: 15_000 });
+    await callTool(socket, "update_lead_field", { field: "rating_sex", captureKey: "rating_sex", value: "female" });
 
     await callTool(socket, "update_lead_field", { field: "age", captureKey: "age", value: 71 });
     await callTool(socket, "update_lead_field", { field: "tobacco", captureKey: "tobacco", value: "former" });
@@ -450,8 +461,8 @@ describe("sales flow end-to-end", () => {
 
     // And the rail actually reaches the model.
     const instructions = socket.currentInstructions();
-    assert.match(instructions, /PRESENTING A QUOTE/);
-    assert.match(instructions, /Never call the number final, locked in, approved/);
+    assert.match(instructions, /PRESENTING THE QUOTE OPTIONS/);
+    assert.match(instructions, /Never call an estimate\s+final, locked in, approved/);
   });
 
   it("lets a carrier-sourced quote name its carrier, but still never calls it bindable", async () => {

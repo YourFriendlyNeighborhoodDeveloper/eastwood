@@ -253,8 +253,20 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
     """
     Real-time carrier quoting. Hits rate tables (FE) or CMS API (Medicare) with formula fallback.
     Used directly by the AI agent's get_quote tool.
+
+    When the payload carries the prospect's stated need (coverage_purpose /
+    burial_or_cremation / desired_coverage_amount / monthly_budget), the
+    response also carries three deterministic options (C, B, A) sized by the
+    quote engine — the model never picks a face amount or premium itself.
     """
-    from domain.quoting import CmsMedicareAdapter, FormulaAdapter, QuoteManager, QuoteRequest, RateTableAdapter
+    from domain.quoting import (
+        CmsMedicareAdapter,
+        FormulaAdapter,
+        QuoteManager,
+        QuoteRequest,
+        RateTableAdapter,
+        build_quote_options,
+    )
 
     body: dict = await request.json()
     settings = get_settings()
@@ -311,24 +323,93 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
             **q.labels(),
         }
 
+    # Three-option (C/B/A) generation for life products. The engine — never the
+    # model — sizes the faces from the stated need and budget, quotes each face
+    # through the same adapter stack, and orders them for presentation.
+    def _amount(key: str) -> int | None:
+        v = body.get(key)
+        try:
+            n = int(float(v))
+            return n if n > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    tiered_options: list[dict] = []
+    if req.product_line in ("final_expense", "life"):
+        try:
+            opts = await build_quote_options(
+                manager,
+                req,
+                coverage_purpose=body.get("coverage_purpose"),
+                burial_or_cremation=body.get("burial_or_cremation"),
+                desired_amount=_amount("desired_coverage_amount"),
+                monthly_budget=_amount("monthly_budget"),
+                min_face=settings.quote_min_face_dollars,
+                max_face=settings.quote_max_face_dollars,
+            )
+            tiered_options = [o.to_payload() for o in opts]
+            for o in tiered_options:
+                o["source"] = "estimate" if o.get("quote_type") != "carrier" else o.get("rate_source")
+        except Exception:
+            logger.exception("three-option quote build failed for lead %s", req.lead_id)
+            tiered_options = []
+
     return {
         "quote_source": _source_label(response.source),
         "fetched_at": response.fetched_at,
         **response.labels(),
         "best": _option(best) if best else None,
         "all_options": [_option(q) for q in response.quotes],
+        # Presentation order C, B, A. Empty when the engine could not size or
+        # quote the tiers — the caller must fall back honestly, never invent.
+        "options": tiered_options,
         "errors": response.errors,
     }
 
 
 # ── Appointment booking ───────────────────────────────────────────────────────
 
+@router.get("/api/scheduling/availability")
+async def scheduling_availability(timezone: str | None = None, limit: int = 3):
+    """
+    Real upcoming appointment times from the configured scheduling provider
+    (Calendly). The voice agent calls this BEFORE offering any time to a
+    prospect — offered slots are actual availability, never invented.
+
+    Fail-soft: when Calendly is disabled or unreachable the response says so and
+    returns no times; the agent falls back to collecting a preference honestly.
+    """
+    settings = get_settings()
+    provider = _make_scheduling_provider(settings)
+    if provider is None:
+        return {"calendly_enabled": False, "times": [], "timezone": settings.calendly_default_timezone}
+
+    from domain.scheduling import CalendlyUnavailableError
+
+    tz = timezone or settings.calendly_default_timezone
+    try:
+        times = await provider.available_times(timezone_name=tz)
+    except CalendlyUnavailableError as exc:
+        logger.warning("calendly availability unavailable: %s", exc)
+        return {"calendly_enabled": True, "times": [], "timezone": tz, "error": "unavailable"}
+
+    return {"calendly_enabled": True, "times": times[: max(limit, 1)], "timezone": tz}
+
+
 @router.post("/api/appointments", status_code=201)
 async def create_appointment(request: Request, session: AsyncSession = Depends(get_session)):
     """
-    Create an appointment from a date/time preference expressed by the AI agent.
-    Persists the appointment, the handoff ProspectProfile, and — only after the
-    write succeeds — sends the licensed agent an immediate brief SMS.
+    Create an appointment from the AI agent's booking request.
+
+    When Calendly is enabled and the agent sends a selected slot (start_time +
+    prospect email), the slot is booked through the Calendly Scheduling API and
+    the identifiers are persisted. A Calendly failure still persists the local
+    appointment request and profile — with calendly_status="failed" — so Ryan
+    gets the requested time, but no confirmed-appointment alert is sent and the
+    prospect is never told the calendar booking succeeded.
+
+    The appointment brief SMS sends only after the local write commits AND
+    (when Calendly was requested) Calendly confirmed the booking. Exactly once.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta, timezone
@@ -341,16 +422,54 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
     session_id = body.get("session_id", "")
     preferred_date = body.get("preferred_date")
     preferred_time = body.get("preferred_time", "10:00")
+    start_time_iso = body.get("start_time")  # ISO slot chosen from availability
+    prospect_email = body.get("email")
+    tz_name = body.get("timezone") or settings.calendly_default_timezone
     notes = body.get("notes")
     prospect_profile = body.get("prospect_profile")
 
-    if not lead_id_str or not preferred_date:
-        raise HTTPException(status_code=422, detail="lead_id and preferred_date are required")
+    if not lead_id_str or not (preferred_date or start_time_iso):
+        raise HTTPException(status_code=422, detail="lead_id and a date/time are required")
 
-    try:
-        starts_at = datetime.fromisoformat(f"{preferred_date}T{preferred_time}").replace(tzinfo=timezone.utc)
-    except ValueError:
-        starts_at = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    # ── Calendly booking happens BEFORE the local write, so what we persist is
+    # what actually happened on the calendar.
+    provider = _make_scheduling_provider(settings)
+    calendly_requested = provider is not None and bool(start_time_iso)
+    calendly_booking = None
+    calendly_status = "not_requested"
+    if calendly_requested:
+        if not prospect_email:
+            raise HTTPException(status_code=422, detail="email_required")
+        from domain.scheduling import CalendlyUnavailableError
+
+        prospect_name = ""
+        if prospect_profile:
+            prospect_name = str(prospect_profile.get("full_name") or "").replace("unknown", "").strip()
+        try:
+            calendly_booking = await provider.create_booking(
+                start_time=start_time_iso,
+                name=prospect_name or "Eastwood prospect",
+                email=prospect_email,
+                timezone_name=tz_name,
+                phone=(prospect_profile or {}).get("phone_e164"),
+            )
+            calendly_status = "confirmed"
+        except CalendlyUnavailableError as exc:
+            logger.warning("calendly booking failed for lead %s: %s", lead_id_str, exc)
+            calendly_status = "failed"
+
+    if start_time_iso:
+        try:
+            starts_at = datetime.fromisoformat(start_time_iso.replace("Z", "+00:00"))
+            if starts_at.tzinfo is None:
+                starts_at = starts_at.replace(tzinfo=timezone.utc)
+        except ValueError:
+            starts_at = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    else:
+        try:
+            starts_at = datetime.fromisoformat(f"{preferred_date}T{preferred_time}").replace(tzinfo=timezone.utc)
+        except ValueError:
+            starts_at = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
 
     ends_at = starts_at + timedelta(hours=1)
 
@@ -367,8 +486,15 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
         lead_id=_uuid.UUID(lead_id_str),
         slot_id=slot.id,
         tenant_id=settings.default_tenant_id,
-        status="scheduled",
+        status="scheduled" if calendly_status != "failed" else "requested",
         notes=notes,
+        prospect_email=prospect_email,
+        timezone=tz_name,
+        calendly_status=calendly_status,
+        calendly_event_uri=calendly_booking.event_uri if calendly_booking else None,
+        calendly_invitee_uri=calendly_booking.invitee_uri if calendly_booking else None,
+        calendly_cancel_url=calendly_booking.cancel_url if calendly_booking else None,
+        calendly_reschedule_url=calendly_booking.reschedule_url if calendly_booking else None,
     )
     session.add(appointment)
     await session.flush()
@@ -376,6 +502,14 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
     # Persist the full profile as the canonical handoff record, in the same
     # transaction as the appointment — the SMS is just the alert.
     if prospect_profile:
+        prospect_profile = {
+            **prospect_profile,
+            "calendly_status": calendly_status,
+            "appointment_time": (
+                f"{starts_at.isoformat()} {tz_name}" if start_time_iso
+                else prospect_profile.get("appointment_time") or f"{preferred_date} {preferred_time} {tz_name}"
+            ),
+        }
         session.add(_ProfileModel(
             lead_id=_uuid.UUID(lead_id_str),
             appointment_id=appointment.id,
@@ -400,9 +534,12 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
         key=lead_id_str,
     )
 
-    # Only after the write succeeds. Fail-soft: a missing destination or SMS error
-    # never turns a real booking into a failure for the prospect.
-    if prospect_profile:
+    # Only after the write succeeds — and never for a failed Calendly booking:
+    # a "NEW EASTWOOD APPOINTMENT" alert for a slot that is not on the calendar
+    # would be a false confirmation. Ryan still learns about the requested time
+    # from the call-outcome SMS and the persisted profile. Fail-soft: a missing
+    # destination or SMS error never breaks the prospect-facing booking.
+    if prospect_profile and calendly_status != "failed":
         try:
             _make_appointment_notifier(settings).send_agent_brief(
                 prospect_profile, appointment_id=str(appointment.id)
@@ -413,8 +550,14 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
     return {
         "appointment_id": str(appointment.id),
         "booked_at": starts_at.isoformat(),
-        "date": preferred_date,
-        "time": preferred_time,
+        "date": preferred_date or starts_at.date().isoformat(),
+        "time": preferred_time if not start_time_iso else starts_at.strftime("%H:%M"),
+        "timezone": tz_name,
+        "calendly_status": calendly_status,
+        "calendly_event_uri": calendly_booking.event_uri if calendly_booking else None,
+        "calendly_invitee_uri": calendly_booking.invitee_uri if calendly_booking else None,
+        "calendly_cancel_url": calendly_booking.cancel_url if calendly_booking else None,
+        "calendly_reschedule_url": calendly_booking.reschedule_url if calendly_booking else None,
     }
 
 
@@ -425,6 +568,13 @@ def _make_appointment_notifier(settings):
 
     sms = SmsClient() if settings.twilio_account_sid else None
     return AppointmentNotificationService(sms, settings.agent_notification_phone_e164)
+
+
+def _make_scheduling_provider(settings):
+    """Scheduling provider from settings. Factored out so tests can inject one."""
+    from domain.scheduling import make_scheduling_provider
+
+    return make_scheduling_provider(settings)
 
 
 # ── Acquisition agenda ────────────────────────────────────────────────────────

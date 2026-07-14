@@ -134,12 +134,36 @@ def build_acquisition_plan(
             value_hint="their reason, in their own words",
         ))
 
+    # Employment / income type — how the premium gets paid, and context for Ryan
+    if not hd.get("employment_status"):
+        tasks.append(AcquisitionTask(
+            field="employment_status",
+            priority=7,
+            question=(
+                "And are you working these days, or on Social Security, "
+                "a pension, disability — how are you set up?"
+            ),
+            capture_key="employment_status",
+            value_hint="working | social_security | disability | pension | retired | other",
+        ))
+
+    # Rating sex — required by the quote engine. ASKED, never inferred from
+    # name/voice/pronouns; "unknown" when the prospect declines.
+    if not hd.get("rating_sex"):
+        tasks.append(AcquisitionTask(
+            field="rating_sex",
+            priority=8,
+            question="For rating purposes, are you male or female?",
+            capture_key="rating_sex",
+            value_hint="male | female | unknown (only if they decline — never guessed)",
+        ))
+
     # 2. Tobacco — affects every rate band
     tobacco = (hd.get("tobacco") or "unknown").lower()
     if tobacco == "unknown":
         tasks.append(AcquisitionTask(
             field="tobacco",
-            priority=7,
+            priority=9,
             question="Have you used any tobacco or nicotine products in the past 12 months?",
             capture_key="tobacco",
             value_hint="none | current | former",
@@ -149,7 +173,7 @@ def build_acquisition_plan(
     if not hd.get("conditions"):
         tasks.append(AcquisitionTask(
             field="health_screening",
-            priority=8,
+            priority=10,
             question=(
                 "Have you been diagnosed with or treated for any of the following in the last 5 years: "
                 "cancer, heart disease or heart attack, diabetes, stroke, COPD, or kidney disease? "
@@ -163,7 +187,7 @@ def build_acquisition_plan(
     if not hd.get("current_meds"):
         tasks.append(AcquisitionTask(
             field="medications",
-            priority=9,
+            priority=11,
             question=(
                 "Are you currently taking any prescription medications? "
                 "If so, which ones?"
@@ -176,7 +200,7 @@ def build_acquisition_plan(
     if not hd.get("height_weight"):
         tasks.append(AcquisitionTask(
             field="height_weight",
-            priority=10,
+            priority=12,
             question="And what's your height and current weight?",
             capture_key="height_weight",
             value_hint="e.g. 5'8\" 180 lbs",
