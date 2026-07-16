@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.security import pinned_tenant_id
 from config.settings import get_settings
 from db.session import get_session
 from kafka_io.kafka_client import publish
@@ -51,14 +52,23 @@ async def facebook_webhook(request: Request):
     raw_body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
 
-    if settings.facebook_app_secret:
-        expected = "sha256=" + hmac.new(
-            settings.facebook_app_secret.encode(),
-            raw_body,
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature):
-            raise HTTPException(status_code=403, detail="invalid signature")
+    # Fail closed: without the app secret no signature can be verified, and an
+    # unsigned POST must never become a lead. (This route is classified
+    # PROVIDER_SIGNED_WEBHOOK in api.security — this check IS its protection.)
+    if not settings.facebook_app_secret:
+        logger.warning(
+            "facebook webhook denied: route=%s result=denied reason=app_secret_unconfigured",
+            request.url.path,
+        )
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    expected = "sha256=" + hmac.new(
+        settings.facebook_app_secret.encode(),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=403, detail="invalid signature")
 
     import orjson
     data = orjson.loads(raw_body)
@@ -78,12 +88,10 @@ async def facebook_webhook(request: Request):
 
 @router.get("/api/booking")
 async def get_booking_slots(
-    tenant_id: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
     from datetime import datetime, timezone
-    settings = get_settings()
-    t_id = tenant_id or settings.default_tenant_id
+    t_id = pinned_tenant_id()
     repo = BookingRepo(session)
     slots = await repo.get_available_slots(t_id, after=datetime.now(timezone.utc))
     return {"slots": [{"id": str(s.id), "starts_at": s.starts_at.isoformat(), "ends_at": s.ends_at.isoformat()} for s in slots]}
@@ -181,13 +189,12 @@ async def get_ruleset(session: AsyncSession = Depends(get_session)):
 async def create_batch(request: Request, session: AsyncSession = Depends(get_session)):
     """Register a new lead purchase so every lead can be attributed to cost."""
     body: dict = await request.json()
-    settings = get_settings()
     repo = BatchRepo(session)
     import secrets
     batch_id = body.get("batch_id") or f"batch_{secrets.token_hex(6)}"
     batch = await repo.create(
         batch_id=batch_id,
-        tenant_id=body.get("tenant_id", settings.default_tenant_id),
+        tenant_id=pinned_tenant_id(),
         vendor_name=body["vendor_name"],
         source_tag=body["source_tag"],
         cost_cents=int(body.get("cost_cents", 0)),
@@ -197,10 +204,9 @@ async def create_batch(request: Request, session: AsyncSession = Depends(get_ses
 
 
 @router.get("/api/batches")
-async def list_batches(tenant_id: str | None = None, session: AsyncSession = Depends(get_session)):
-    settings = get_settings()
+async def list_batches(session: AsyncSession = Depends(get_session)):
     repo = BatchRepo(session)
-    batches = await repo.list_by_tenant(tenant_id or settings.default_tenant_id)
+    batches = await repo.list_by_tenant(pinned_tenant_id())
     return {"batches": [
         {"batch_id": b.id, "vendor_name": b.vendor_name, "source_tag": b.source_tag,
          "cost_cents": b.cost_cents, "created_at": b.created_at.isoformat()}
@@ -228,11 +234,10 @@ async def batch_roi(batch_id: str, session: AsyncSession = Depends(get_session))
 
 
 @router.get("/api/lead-sources/roi")
-async def lead_source_roi(tenant_id: str | None = None, session: AsyncSession = Depends(get_session)):
+async def lead_source_roi(session: AsyncSession = Depends(get_session)):
     """Cross-batch ROI ranked by AP return — use this to decide where to spend tomorrow."""
-    settings = get_settings()
     repo = BatchRepo(session)
-    rows = await repo.source_roi_summary(tenant_id or settings.default_tenant_id)
+    rows = await repo.source_roi_summary(pinned_tenant_id())
     for r in rows:
         c = r["total_cost_cents"]
         r["verdict"] = (
@@ -671,7 +676,6 @@ async def tag_call_outcome(call_id: str, request: Request, session: AsyncSession
 
     body: dict = await request.json()
     outcome = body.get("outcome", "")
-    settings = get_settings()
 
     call_repo = CallRepo(session)
     await call_repo.update_outcome(
@@ -692,7 +696,7 @@ async def tag_call_outcome(call_id: str, request: Request, session: AsyncSession
     followup_repo = FollowupRepo(session)
     n = await schedule_for_outcome(
         lead_id=_uuid.UUID(body["lead_id"]),
-        tenant_id=body.get("tenant_id", settings.default_tenant_id),
+        tenant_id=pinned_tenant_id(),
         outcome=outcome,
         context_data=body.get("context", {}),
         followup_repo=followup_repo,
@@ -704,7 +708,6 @@ async def tag_call_outcome(call_id: str, request: Request, session: AsyncSession
 
 @router.get("/api/cockpit/queue")
 async def cockpit_queue(
-    tenant_id: str | None = None,
     limit: int = 25,
     session: AsyncSession = Depends(get_session),
 ):
@@ -717,8 +720,7 @@ async def cockpit_queue(
     from db.models import Lead as _Lead
     from domain.placement import place
 
-    settings = get_settings()
-    t_id = tenant_id or settings.default_tenant_id
+    t_id = pinned_tenant_id()
 
     result = await session.execute(
         _select(_Lead)
@@ -934,14 +936,12 @@ def _get_ai_agent_client():
 
 @router.get("/api/dashboard/summary")
 async def dashboard_summary(
-    tenant_id: str | None = None,
     session: AsyncSession = Depends(get_session),
 ):
     from sqlalchemy import func, select
     from db.models import Lead
 
-    settings = get_settings()
-    t_id = tenant_id or settings.default_tenant_id
+    t_id = pinned_tenant_id()
 
     result = await session.execute(
         select(Lead.score_band, func.count(Lead.id))

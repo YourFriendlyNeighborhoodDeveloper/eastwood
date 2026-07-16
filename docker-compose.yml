@@ -118,6 +118,8 @@ services:
       CMS_TARGET_CARRIERS: ${CMS_TARGET_CARRIERS:-aetna,humana,cvs}
       QUOTE_TIMEOUT_SECONDS: ${QUOTE_TIMEOUT_SECONDS:-6.0}
       DNC_TEST_ALLOWLIST: ${DNC_TEST_ALLOWLIST:-}
+      TWILIO_SIGNATURE_VALIDATION_ENABLED: ${TWILIO_SIGNATURE_VALIDATION_ENABLED:-true}
+      EASTWOOD_API_KEY: ${EASTWOOD_API_KEY:-}
 
 
   ai-agent:
@@ -138,6 +140,7 @@ services:
       AGENT_DATABASE_URL: postgresql://eastwood:eastwood@postgres:5432/agent
       KAFKA_BROKERS: kafka:9092
       EASTWOOD_CORE_BASE_URL: http://eastwood-core:8080
+      EASTWOOD_API_KEY: ${EASTWOOD_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       REALTIME_MODEL: gpt-realtime-2
       REALTIME_VOICE: shimmer

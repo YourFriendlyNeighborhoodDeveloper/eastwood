@@ -138,14 +138,28 @@ def test_operator_exempt_is_the_only_way_to_build_an_exempt_result():
 # ── (c) the boot guard forbids the allowlist in production ───────────────────
 
 def test_boot_guard_refuses_production_with_a_non_empty_allowlist():
-    settings = Settings(app_env="production", bypass_tcpa=False, dnc_test_allowlist=TEST_NUMBER)
+    settings = Settings(
+        _env_file=None,
+        app_env="production",
+        bypass_tcpa=False,
+        dnc_test_allowlist=TEST_NUMBER,
+        twilio_signature_validation_enabled=True,
+        eastwood_api_key="a-production-api-key",
+    )
     with pytest.raises(UnsafeProductionConfigError, match="DNC_TEST_ALLOWLIST"):
         assert_production_safety(settings)
 
 
 def test_boot_guard_allows_production_with_an_empty_allowlist():
-    assert_production_safety(Settings(app_env="production", bypass_tcpa=False, dnc_test_allowlist=""))
+    assert_production_safety(Settings(
+        _env_file=None,
+        app_env="production",
+        bypass_tcpa=False,
+        dnc_test_allowlist="",
+        twilio_signature_validation_enabled=True,
+        eastwood_api_key="a-production-api-key",
+    ))
 
 
 def test_boot_guard_allows_the_allowlist_outside_production():
-    assert_production_safety(Settings(app_env="development", bypass_tcpa=False, dnc_test_allowlist=TEST_NUMBER))
+    assert_production_safety(Settings(_env_file=None, app_env="development", bypass_tcpa=False, dnc_test_allowlist=TEST_NUMBER))

@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     # Leave blank to skip outbound call placement (session is still created).
     public_base_url: str = ""
 
+    # Twilio webhook authentication. Every /twiml/* and /twilio/* request must
+    # carry a valid X-Twilio-Signature computed over the public URL. Disabling
+    # this is a development-only affordance: production refuses to boot with it
+    # off, and a disabled deployment logs a loud warning at startup.
+    twilio_signature_validation_enabled: bool = True
+
+    # Bearer key for every operational /api/* route. Secret — never committed,
+    # never logged, never echoed in a response. Empty means no credential can
+    # succeed (fail closed); production refuses to boot without one.
+    eastwood_api_key: str = ""
+
     # Live handoff: Ryan's mobile number receives hot-transfer SMS briefs.
     # Set RYAN_PHONE_NUMBER=+1XXXXXXXXXX to enable.
     ryan_phone_number: str = ""
@@ -209,4 +220,18 @@ def assert_production_safety(settings: Settings | None = None) -> None:
             "The allowlist scrubs listed numbers as exempt without a provider — a "
             "testing-only affordance. Clear DNC_TEST_ALLOWLIST, or set APP_ENV to a "
             "non-production value."
+        )
+    if s.app_env.strip().lower() == "production" and not s.twilio_signature_validation_enabled:
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with "
+            "TWILIO_SIGNATURE_VALIDATION_ENABLED=false. Unauthenticated webhook "
+            "callbacks would let anyone spoof call status and TwiML fetches. "
+            "Re-enable validation, or set APP_ENV to a non-production value."
+        )
+    if s.app_env.strip().lower() == "production" and not s.eastwood_api_key.strip():
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production without EASTWOOD_API_KEY. "
+            "Operational /api routes fail closed without a configured key, which "
+            "would break quoting and booking mid-campaign. Set EASTWOOD_API_KEY "
+            "in the environment (and give the same value to ai-agent)."
         )

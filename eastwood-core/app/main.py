@@ -4,12 +4,13 @@ import logging
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
 
 from api.routes import router
+from api.security import enforce_route_security
 from config.settings import assert_production_safety, get_settings
 from kafka_io.kafka_client import KafkaConsumer, stop_producer
 from workers.brain import WorkersBrain
@@ -30,6 +31,21 @@ async def lifespan(app: FastAPI):
 
     # Fail before touching the database, Kafka, or the dialer.
     assert_production_safety(settings)
+
+    if not settings.twilio_signature_validation_enabled:
+        logger.warning(
+            "================================================================\n"
+            "TWILIO SIGNATURE VALIDATION IS DISABLED\n"
+            "(TWILIO_SIGNATURE_VALIDATION_ENABLED=false)\n"
+            "Every /twiml and /twilio route accepts unauthenticated requests.\n"
+            "Development only — production refuses to boot in this state.\n"
+            "================================================================"
+        )
+    if not settings.eastwood_api_key.strip():
+        logger.warning(
+            "EASTWOOD_API_KEY is not set — every authenticated /api route will "
+            "refuse requests (fail closed). Set the same key here and in ai-agent."
+        )
 
     # Ensure all ORM tables exist (idempotent — safe to run every startup)
     from sqlalchemy import text
@@ -254,7 +270,19 @@ async def lifespan(app: FastAPI):
     await brain._ai_agent.aclose()
 
 
-app = FastAPI(title="Eastwood Core", lifespan=lifespan)
+# Route security is applied app-wide from the explicit policy table in
+# api.security — every route, including /health and /metrics, is classified.
+# The docs/openapi endpoints are plain Starlette routes that app-level
+# dependencies cannot protect, and the schema maps the whole attack surface,
+# so they are disabled rather than left reachable without credentials.
+app = FastAPI(
+    title="Eastwood Core",
+    lifespan=lifespan,
+    dependencies=[Depends(enforce_route_security)],
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.include_router(router)
 
 

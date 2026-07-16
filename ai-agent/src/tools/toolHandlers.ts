@@ -2,6 +2,7 @@ import type { Actor } from "xstate";
 import { z } from "zod";
 import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 import { loadConfig } from "../config.js";
+import { coreFetch } from "../coreClient.js";
 import { logger, toolInvocations } from "../observability.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
 import type { AcquisitionTask, LeadContext, ProductLine, Quote, QuoteOption, SessionState } from "../types.js";
@@ -155,7 +156,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const c = session.captured;
     let quoteData: Record<string, unknown>;
     try {
-      const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/quote`, {
+      const resp = await coreFetch(`/api/quote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -420,13 +421,11 @@ export const toolHandlers: Record<string, ToolHandler> = {
 
   get_booking_slots: async (input, { sessionId, session }) => {
     const parsed = z.object({ timezone: z.string().optional() }).parse(input);
-    const cfg = loadConfig();
 
-    const url = new URL(`${cfg.eastwoodCoreBaseUrl}/api/scheduling/availability`);
-    if (parsed.timezone) url.searchParams.set("timezone", parsed.timezone);
+    const query = parsed.timezone ? `?timezone=${encodeURIComponent(parsed.timezone)}` : "";
 
     try {
-      const resp = await fetch(url.toString());
+      const resp = await coreFetch(`/api/scheduling/availability${query}`);
       if (!resp.ok) throw new Error(`availability API ${resp.status}`);
       const data = (await resp.json()) as {
         calendly_enabled?: boolean;
@@ -532,8 +531,6 @@ export const toolHandlers: Record<string, ToolHandler> = {
       session.captured[CAPTURE.prospectEmail] = email;
     }
 
-    const cfg = loadConfig();
-
     // Assemble the handoff profile from captured facts before we write, so a
     // successful appointment carries Ryan's brief. Never model-authored.
     const appointmentTime = parsed.slotStartTime
@@ -550,7 +547,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     // appointment_booked itself.
     let data: Record<string, unknown>;
     try {
-      const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/appointments`, {
+      const resp = await coreFetch(`/api/appointments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -632,11 +629,10 @@ export const toolHandlers: Record<string, ToolHandler> = {
 
   add_followup_questions: async (input, { lead, sessionId }) => {
     const parsed = z.object({ condition: z.string() }).parse(input);
-    const cfg = loadConfig();
 
     let questions: AcquisitionTask[] = [];
     try {
-      const resp = await fetch(`${cfg.eastwoodCoreBaseUrl}/api/agenda/followups`, {
+      const resp = await coreFetch(`/api/agenda/followups`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lead_id: lead.leadId, condition: parsed.condition }),

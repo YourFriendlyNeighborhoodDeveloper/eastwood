@@ -5,6 +5,9 @@ const ConfigSchema = z.object({
   kafkaBrokers: z.string().min(1),
   openaiApiKey: z.string().default(""),
   eastwoodCoreBaseUrl: z.string().url().default("http://eastwood-core:8080"),
+  // Service credential for eastwood-core's authenticated /api routes. Must
+  // match core's EASTWOOD_API_KEY; empty means core will refuse every call.
+  eastwoodApiKey: z.string().default(""),
   agentDisplayName: z.string().default("Imogen"),
   agencyName: z.string().default("Eastwood Financial"),
   // "production" forbids quoting on an agent_default face amount.
@@ -43,6 +46,7 @@ export function loadConfig(): Config {
     kafkaBrokers: process.env["KAFKA_BROKERS"] ?? "localhost:9092",
     openaiApiKey: process.env["OPENAI_API_KEY"],
     eastwoodCoreBaseUrl: process.env["EASTWOOD_CORE_BASE_URL"],
+    eastwoodApiKey: process.env["EASTWOOD_API_KEY"],
     agentDisplayName: process.env["AGENT_DISPLAY_NAME"],
     agencyName: process.env["AGENCY_NAME"],
     appEnv: process.env["APP_ENV"],
