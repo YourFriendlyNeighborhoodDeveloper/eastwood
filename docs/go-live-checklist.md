@@ -27,12 +27,19 @@ Conventions:
 - [ ] Confirm **no secrets appear in currently tracked files**:
       `git grep -nE 'sk-(proj-)?[A-Za-z0-9]|AC[0-9a-f]{32}' -- . ':!.env.example'`
       should return nothing.
-- [ ] **Known limitation — git history still contains prior secrets.** The earlier
-      `.env` (with a live Twilio token and OpenAI key) is in commit `e84ad7e`.
-      Untracking it did not remove it from history. If this repo has ever been
-      pushed or shared, treat those keys as burned even after rotation. History
-      rewrite (`git filter-repo`) is the only removal; it is out of scope for this
-      checklist but must be tracked.
+- [x] **Git history scrubbed (2026-07-16).** `git filter-repo` removed the old
+      `.env` (live Twilio token + OpenAI key), the committed lead-export CSV
+      (real PII), and `ai-agent/node_modules` from every commit, and replaced
+      the leaked credential literals anywhere else they appeared. Verified: the
+      secret grep above returns nothing across all reachable history
+      (`git rev-list --all`), `git fsck --unreachable` is empty, and the repo
+      has never had a remote — no external copy exists. Every commit SHA
+      changed in the rewrite. **The keys themselves are still live** — the
+      rotation boxes above remain the blocker.
+- [ ] **Delete the pre-scrub backup after rotation is verified.**
+      `~/Desktop/Eastwood-pre-scrub-2026-07-16.bundle` holds the un-scrubbed
+      history (secrets + lead PII) as a safety net for the rewrite. Once the
+      old credentials are confirmed dead and the repo state is good, remove it.
 
 ---
 
@@ -151,7 +158,7 @@ permitted.
 
 ## 5. Public webhook infrastructure
 
-### Completed — webhook authentication and API auth (commit `5cdda6c`)
+### Completed — webhook authentication and API auth (commit `3da7a67`)
 
 Implemented and verified 2026-07-16. Do not re-audit; re-verify only if these
 surfaces change. The policy lives in `eastwood-core/api/security.py` and its
@@ -341,7 +348,7 @@ are configuration, credentials, or data:
       remain in git history (§1).
 - [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel (§5).
       Webhook signature validation and API authentication are implemented and
-      verified (commit `5cdda6c`); the URL itself is the remaining gap.
+      verified (commit `3da7a67`); the URL itself is the remaining gap.
 - [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
       the formula adapter; carrier rate tables are not loaded (§4).
 - [ ] **Production-safe environment values** — confirm `APP_ENV=production`,
