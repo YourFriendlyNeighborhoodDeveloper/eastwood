@@ -151,25 +151,72 @@ permitted.
 
 ## 5. Public webhook infrastructure
 
+### Completed — webhook authentication and API auth (commit `5cdda6c`)
+
+Implemented and verified 2026-07-16. Do not re-audit; re-verify only if these
+surfaces change. The policy lives in `eastwood-core/api/security.py` and its
+tests in `eastwood-core/tests/test_route_security.py` and
+`ai-agent/src/tests/coreAuth.test.ts`.
+
+- [x] Centralized fail-closed route classification and enforcement (one policy
+      table, one app-wide dependency; unlisted routes default to authenticated)
+- [x] Twilio signature validation using the official `RequestValidator` —
+      missing or invalid `X-Twilio-Signature` returns 403 on `/twiml/*` and
+      `/twilio/*`
+- [x] Canonical callback URL reconstruction from `PUBLIC_BASE_URL` —
+      attacker-supplied `X-Forwarded-Host`/`X-Forwarded-Proto` cannot alter
+      validation; nginx overwrites forwarded headers at the edge
+- [x] Form-encoded and JSON/`bodySHA256` validation per Twilio's documented
+      schemes
+- [x] Facebook webhook signature enforcement (fails closed when
+      `FACEBOOK_APP_SECRET` is unset)
+- [x] Bearer API authentication between `ai-agent` and `eastwood-core`
+      (`EASTWOOD_API_KEY`; constant-time compare; 401 absent, 403 invalid;
+      fail closed when unconfigured)
+- [x] Production boot guards: refuses to start without the API key or with
+      signature validation disabled
+- [x] Tenant ID pinning — no client-controlled tenant parameters remain
+- [x] Restricted nginx exposure for `ai-agent` — only the Twilio media
+      WebSocket is public; session admin, health, and metrics stay internal
+- [x] `/twilio/` nginx proxy routing (status callbacks previously never routed
+      through nginx at all)
+- [x] FastAPI docs/OpenAPI endpoints disabled
+- [x] Safe security logging — route, result, reason code, request id only;
+      never secrets, signatures, bodies, or phone numbers
+
+Verified against live Docker stack:
+- eastwood-core: 182 passed
+- ai-agent: 72 passed
+- TypeScript: clean
+- Canonical Twilio signature: 200
+- Spoofed-origin signature: 403
+- Unsigned nginx Twilio request: 403
+- Media WebSocket edge handshake: 101
+- Internal ai-agent HTTP endpoints at edge: 404
+
+### Remaining operator steps
+
 - [ ] Replace the temporary ngrok URL with a **stable HTTPS `PUBLIC_BASE_URL`**.
       Twilio TwiML, status, and media-stream callbacks are built from this; when it
-      rotates, every webhook 404s mid-campaign.
+      rotates, every webhook 404s mid-campaign. Signature validation reconstructs
+      the signed URL from it, so it must be exactly what Twilio is given.
+- [ ] Set **`EASTWOOD_API_KEY`** to a long random secret (`openssl rand -hex 32`)
+      — one value shared by `eastwood-core` and `ai-agent` (compose passes it to
+      both). Production refuses to boot without it.
+- [ ] Keep **`TWILIO_SIGNATURE_VALIDATION_ENABLED=true`** (the default).
+      Production refuses to boot with it off.
 - [ ] Verify the Twilio **voice / status / media** routes resolve:
   - `POST|GET {PUBLIC_BASE_URL}/twiml/call/{session_id}` (TwiML)
   - `POST {PUBLIC_BASE_URL}/twilio/status/{session_id}` (terminal status → retry +
     session close + slot release)
   - `wss://…/agent/sessions/{session_id}/media` (media stream via nginx `/agent/`)
 - [ ] Verify **TLS** on `PUBLIC_BASE_URL` (valid cert, HTTPS only).
-- [ ] **Callback authentication — known gap.** Twilio request-signature validation
-      (`X-Twilio-Signature`) is **not currently implemented** on the webhook
-      routes. Before launch, either add signature validation or network-restrict
-      the webhook endpoints to Twilio's IP ranges. Do not expose unauthenticated
-      callbacks to the open internet for a live campaign.
-- [ ] Verify `ai-agent` and `eastwood-core` are reachable from the public edge
-      (health: `GET /health` on both).
+- [ ] Verify service health on the **internal** network (`GET /health` on both
+      services via their compose ports) — nginx intentionally does not proxy
+      health or metrics to the public edge.
 - [ ] Run a **full webhook smoke test**: place one call to your own phone, answer,
       let it complete, and confirm the status callback fired (slot released,
-      session closed).
+      session closed) — with signature validation enabled throughout.
 
 ---
 
@@ -292,14 +339,16 @@ are configuration, credentials, or data:
       not been run against the real registry; no lead is currently `clear` (§2).
 - [ ] **Rotated Twilio and OpenAI credentials** — prior keys are still valid and
       remain in git history (§1).
-- [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel; webhook
-      signature validation is also not yet implemented (§5).
+- [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel (§5).
+      Webhook signature validation and API authentication are implemented and
+      verified (commit `5cdda6c`); the URL itself is the remaining gap.
 - [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
       the formula adapter; carrier rate tables are not loaded (§4).
 - [ ] **Production-safe environment values** — confirm `APP_ENV=production`,
       `BYPASS_TCPA=false`, `DNC_TEST_ALLOWLIST` empty, thresholds `75`/`50`,
-      `RESET_RATE_TABLE_ON_BOOT=false`, and `ACTIVE_STATES` covering the campaign
-      (§3). `DNC_TEST_ALLOWLIST` scrubs listed numbers as exempt without a
+      `RESET_RATE_TABLE_ON_BOOT=false`, `ACTIVE_STATES` covering the campaign
+      (§3), `EASTWOOD_API_KEY` set, and `TWILIO_SIGNATURE_VALIDATION_ENABLED=true`
+      (§5 — the boot guard enforces the last two). `DNC_TEST_ALLOWLIST` scrubs listed numbers as exempt without a
       provider — a testing affordance only; `eastwood-core` refuses to boot in
       production if it is non-empty.
 
