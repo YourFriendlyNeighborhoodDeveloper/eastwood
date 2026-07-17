@@ -40,7 +40,10 @@ async def schedule_for_outcome(
         "spouse_objection":          "quoted_spouse_objection",
         "application_not_completed": "application_not_completed",
         "payment_failed":            "payment_failed",
-        "callback":                  "no_contact",
+        # A callback outcome means a person answered and asked to talk later —
+        # the interested_busy cadence ("you mentioned you'd have time…"), not
+        # the no_contact "we've been trying to reach you" sequence.
+        "callback":                  "interested_busy",
     }
 
     # Terminal outcomes get no follow-up

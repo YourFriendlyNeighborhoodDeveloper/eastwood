@@ -135,6 +135,17 @@ def test_quote_failure_reason_is_reported():
     assert "Outcome: quote_failed" in body
 
 
+def test_agent_end_of_call_notes_reach_the_sms():
+    """The agent's recap — where a stated price ceiling lands when it wasn't a
+    structured capture — must appear in the brief, never be dropped."""
+    notes = "Wants to stay under $45/mo; asked for a Tuesday callback."
+    body = format_call_outcome({**PROFILE, "follow_up_notes": notes}, "callback")
+    assert f"Notes: {notes}" in body
+
+    body_without = format_call_outcome(PROFILE, "callback")
+    assert "Notes: unknown" in body_without
+
+
 def test_oversized_brief_falls_back_to_concise_with_profile_pointer():
     sms = _FakeSms()
     svc = CallOutcomeNotificationService(sms, "+13135550199")
@@ -349,3 +360,42 @@ async def test_quoted_not_closed_followup_uses_only_the_persisted_quote(monkeypa
     assert "$15000" in body and "$82.8" in body
     assert "estimate" in body
     assert context["calendly_link"] in body
+
+
+async def test_callback_outcome_uses_interested_busy_not_no_contact(monkeypatch):
+    """A callback outcome means a person answered and asked to talk later.
+    The follow-up must read that way — never 'we've been trying to reach you'."""
+    fake_session = _FakeSession()
+    worker = _brain(monkeypatch, fake_session)
+    worker._outcome_notifier = CallOutcomeNotificationService(_FakeSms(), "+13135550199")
+
+    try:
+        await worker.on_agent_event(_call_ended("callback"))
+    finally:
+        await worker._ai_agent.aclose()
+
+    sequences = [seq for seq, _ in _RecordingFollowupRepo.created]
+    assert sequences, "a callback outcome schedules follow-up like a real lead"
+    assert all(s.startswith("interested_busy:") for s in sequences), sequences
+
+
+async def test_ai_call_without_call_id_writes_a_call_record(monkeypatch):
+    """AI-agent calls carry no callId; the lead must still get call history
+    (outcome, session, and the agent's recap) for the cockpit prep sheet."""
+    from db.models import CallRecord
+
+    fake_session = _FakeSession()
+    worker = _brain(monkeypatch, fake_session)
+    worker._outcome_notifier = CallOutcomeNotificationService(_FakeSms(), "+13135550199")
+
+    notes = "Wants to stay under $45/mo; call back Tuesday."
+    profile = {**PROFILE, "follow_up_notes": notes}
+    try:
+        await worker.on_agent_event(_call_ended("callback", profile=profile))
+    finally:
+        await worker._ai_agent.aclose()
+
+    records = [o for o in fake_session.added if isinstance(o, CallRecord)]
+    assert len(records) == 1, "one call record per connected AI call"
+    assert records[0].session_id == "sess-42"
+    assert records[0].ai_summary == notes

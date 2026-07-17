@@ -192,6 +192,9 @@ def format_call_outcome(profile: dict, outcome: str | None) -> str:
         f"Open questions: {_open_questions(profile)}",
         "",
         f"Summary: {_val(profile, 'transcript_summary')}",
+        # The agent's own end-of-call recap — where a stated price ceiling or
+        # anything else said outside a structured capture lands.
+        f"Notes: {_val(profile, 'follow_up_notes')}",
     ]
     return "\n".join(lines)
 

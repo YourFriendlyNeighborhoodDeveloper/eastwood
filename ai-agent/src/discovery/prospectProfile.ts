@@ -166,6 +166,14 @@ function str(v: unknown): string {
       .filter(Boolean);
     return parts.length ? parts.join(", ") : UNKNOWN;
   }
+  // A captured object (e.g. {height: "5'10", weight: 180}) must flatten to
+  // readable text — String() would render "[object Object]" in Ryan's brief.
+  if (typeof v === "object") {
+    const parts = Object.entries(v as Record<string, unknown>)
+      .filter(([, val]) => val !== undefined && val !== null && String(val).trim() !== "")
+      .map(([k, val]) => `${k}: ${String(val).trim()}`);
+    return parts.length ? parts.join(", ") : UNKNOWN;
+  }
   return String(v).trim();
 }
 

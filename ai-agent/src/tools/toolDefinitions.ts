@@ -195,7 +195,12 @@ export const ALL_TOOLS: ToolDefinition[] = [
   },
   {
     name: "end_call",
-    description: "End the call gracefully.",
+    description:
+      "End the call gracefully. ALWAYS provide notes: a 2-4 sentence factual " +
+      "recap of everything the prospect actually said — especially any monthly " +
+      "price they want to stay under (even approximate, e.g. 'wants to stay " +
+      "under $50/mo'), coverage goals, health facts, objections, and the next " +
+      "step they agreed to. State only what was said; never invent.",
     parameters: {
       type: "object",
       properties: {
@@ -203,8 +208,14 @@ export const ALL_TOOLS: ToolDefinition[] = [
           type: "string",
           enum: ["sold", "appointment_set", "not_interested", "callback", "dnc", "other"],
         },
-        notes: { type: "string" },
+        notes: {
+          type: "string",
+          description:
+            "Factual recap of the conversation: stated budget ceiling, coverage " +
+            "goals, health facts, objections, agreed next step.",
+        },
       },
+      required: ["notes"],
     },
   },
   {

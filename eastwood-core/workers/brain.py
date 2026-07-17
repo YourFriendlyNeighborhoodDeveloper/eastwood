@@ -445,13 +445,31 @@ class WorkersBrain:
             elif event_type in ("call_ended", "transferred"):
                 call_repo = CallRepo(session)
                 outcome = msg.get("outcome")
+                duration = msg.get("durationSeconds") or msg.get("duration_seconds")
                 if call_id_str := msg.get("callId") or msg.get("call_id"):
                     await call_repo.update_outcome(
                         uuid.UUID(call_id_str),
                         status=event_type,
                         outcome=outcome,
-                        duration=msg.get("durationSeconds") or msg.get("duration_seconds"),
+                        duration=duration,
                     )
+                else:
+                    # AI-agent calls carry no callId — without this record the
+                    # lead has no call history and the cockpit prep sheet shows
+                    # a conversation that never happened.
+                    record = await call_repo.create(
+                        lead_id,
+                        msg.get("tenantId") or msg.get("tenant_id") or self._settings.default_tenant_id,
+                        session_id=session_id,
+                    )
+                    await call_repo.update_outcome(
+                        record.id, status=event_type, outcome=outcome, duration=duration
+                    )
+                    notes = (
+                        msg.get("prospectProfile") or msg.get("prospect_profile") or {}
+                    ).get("follow_up_notes")
+                    if isinstance(notes, str) and notes.strip() and notes.strip().lower() != "unknown":
+                        record.ai_summary = notes.strip()
 
                 # The agent attaches the full ProspectProfile it assembled from
                 # captured facts to every connected call's call_ended. Persist it
