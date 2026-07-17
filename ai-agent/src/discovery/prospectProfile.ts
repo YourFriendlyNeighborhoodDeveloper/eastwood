@@ -91,6 +91,32 @@ export function quoteUnlocked(lead: LeadContext, session: SessionState): boolean
 }
 
 /**
+ * What still stands between this call and get_quote, in the model's own terms.
+ * Fed back on every update_lead_field so Imogen always knows the tool is
+ * locked because of THESE gaps — not because quoting is unavailable.
+ */
+export function missingForQuote(lead: LeadContext, session: SessionState): string[] {
+  const c = session.captured;
+  const missing: string[] = [];
+  if (!has(c, CAPTURE.coveragePurpose)) {
+    missing.push("coverage purpose (capture coverage_purpose)");
+  }
+  if (!has(c, CAPTURE.beneficiaryName) && !has(c, CAPTURE.beneficiaryRelationship)) {
+    missing.push("who the coverage protects (capture beneficiary_name or beneficiary_relationship)");
+  }
+  if (!has(c, CAPTURE.desiredCoverageAmount) && !has(c, CAPTURE.monthlyBudget)) {
+    missing.push("a coverage amount or monthly budget (capture desired_coverage_amount or affordable_monthly_budget)");
+  }
+  if (!ratingSexCaptured(session)) {
+    missing.push('rating sex (ask "for rating purposes, are you male or female?" and capture rating_sex)');
+  }
+  if (!tier1HealthComplete(lead)) {
+    missing.push("the remaining health screening questions on the agenda");
+  }
+  return missing;
+}
+
+/**
  * Booking may replace quoting ONLY when quoting genuinely cannot happen:
  * the quote service failed (quoteFailureReason set) or the prospect explicitly
  * asked for an appointment without pricing (captured appointment_only_request).

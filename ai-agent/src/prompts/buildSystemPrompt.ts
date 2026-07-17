@@ -97,6 +97,14 @@ If the prospect asks for a price before you have those, do not guess a number.
 Say: "I can get you a real number, but I need to make sure I'm pricing the right
 amount for the right purpose first." Then gather what's missing.
 
+REAL-TIME QUOTING IS AVAILABLE ON THIS CALL. If get_quote is not in your tools
+yet, that means discovery is incomplete — every update_lead_field result tells
+you exactly which inputs are still missing (missingForQuote). Close those gaps
+and get_quote appears. NEVER tell the prospect you cannot pull up pricing on
+this call, that the system can't quote right now, or that only the agent can
+run numbers — unless get_quote was actually called and failed. Deferring all
+pricing to the agent when quoting was available is a failed call.
+
 Never invent a coverage amount. The system sizes it from what they told you.`.trim();
 
 const SCREENING_PROTOCOL = `

@@ -8,7 +8,13 @@ import { PolicyEngine } from "../policy/policyEngine.js";
 import type { AcquisitionTask, LeadContext, ProductLine, Quote, QuoteOption, SessionState } from "../types.js";
 import { QuoteOptionSchema } from "../types.js";
 import type { SalesContext, SalesEvent } from "../machine/salesMachine.js";
-import { CAPTURE, buildProspectProfile, selectFaceAmount } from "../discovery/prospectProfile.js";
+import {
+  CAPTURE,
+  buildProspectProfile,
+  missingForQuote,
+  quoteUnlocked,
+  selectFaceAmount,
+} from "../discovery/prospectProfile.js";
 
 const policy = new PolicyEngine();
 
@@ -862,11 +868,24 @@ export const toolHandlers: Record<string, ToolHandler> = {
     toolInvocations.inc({ tool_name: "update_lead_field", outcome: "success" });
 
     const remaining = lead.acquisitionPlan?.length ?? 0;
+    // Tell the model exactly where it stands on quoting: the tool is gated on
+    // these gaps, and the instant they close, get_quote is the next move.
+    // Without this, a locked get_quote reads as "quoting is unavailable" and
+    // the prospect gets told an agent will price it later — a false statement.
+    const quoteReady = quoteUnlocked(lead, session);
+    const missing = quoteReady ? [] : missingForQuote(lead, session);
     return {
       captured: true,
       field: parsed.field,
       remainingFields: remaining,
       nextQuestion: remaining > 0 ? (lead.acquisitionPlan?.[0]?.question ?? null) : null,
+      quoteReady,
+      missingForQuote: missing,
+      nextStep: quoteReady
+        ? session.quote
+          ? undefined
+          : "All quote inputs are captured — call get_quote NOW and present real numbers on this call."
+        : `Real-time quoting IS available on this call; get_quote unlocks once you capture: ${missing.join("; ")}.`,
     };
   },
 };
