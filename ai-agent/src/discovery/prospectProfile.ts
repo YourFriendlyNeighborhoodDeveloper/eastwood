@@ -213,6 +213,21 @@ function riskFlags(session: SessionState): string[] {
     .map((c) => `condition: ${c}`);
 }
 
+/**
+ * Stored values that are not backed by a clean transcript of the prospect
+ * saying them — either transcription produced nothing on the call, or the
+ * audio was poor enough that Imogen had to read the value back before storing
+ * it. A complete record is not the same as a correct one, and this is the only
+ * place that distinction reaches the person who acts on it.
+ */
+function unverifiedFields(session: SessionState): string[] {
+  const evidence = session.captureEvidence ?? {};
+  return Object.entries(evidence)
+    .filter(([, e]) => e.grounding !== "grounded")
+    .map(([key]) => key)
+    .sort();
+}
+
 /** Outstanding agenda items = things Ryan may still need to verify. Deterministic. */
 function unansweredQuestions(lead: LeadContext): string[] {
   return (lead.acquisitionPlan ?? []).map((t) => t.question);
@@ -303,6 +318,7 @@ export function buildProspectProfile(
     transcript_summary: UNKNOWN,
     risk_flags: riskFlags(session),
     unanswered_questions: unansweredQuestions(lead),
+    unverified_fields: unverifiedFields(session),
   };
   profile.transcript_summary = callSummary(session, profile);
   return profile;

@@ -59,6 +59,8 @@ function session(captured: Record<string, unknown> = {}, extra: Partial<SessionS
     appointment: null,
     dncCaptured: false,
     callEndedPublished: false,
+    userTranscripts: [],
+    captureEvidence: {},
     ...extra,
     lead: l,
   } as SessionState;

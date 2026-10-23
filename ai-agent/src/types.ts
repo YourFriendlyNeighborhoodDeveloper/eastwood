@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+import type { SlotRecord } from "./discovery/slotState.js";
+import type { QuestionExpectation, TurnOutcome } from "./discovery/turnGate.js";
+
 export const ProductLineSchema = z.enum([
   "final_expense",
   "medicare_advantage",
@@ -31,16 +34,22 @@ export const LeadContextSchema = z.object({
   leadId: z.string().uuid(),
   tenantId: z.string(),
   phoneE164: z.string(),
-  firstName: z.string().optional(),
-  lastName: z.string().optional(),
-  age: z.number().int().optional(),
-  state: z.string().length(2).optional(),
-  productLine: ProductLineSchema.optional(),
-  consentStatus: ConsentStatusSchema.optional(),
-  score: z.number().int().min(0).max(100).optional(),
-  enrichment: z.record(z.unknown()).optional(),
-  triageBucket: z.string().optional(),
-  acquisitionPlan: z.array(AcquisitionTaskSchema).optional(),
+  // .nullable() alongside .optional() on every field below: eastwood-core's
+  // ai_agent.py always includes these keys, so an unset Python field arrives
+  // as JSON null, not an absent key. Zod's .optional() alone rejects null —
+  // that mismatch made session creation 500 for any lead missing, e.g., a
+  // last name or triage bucket (i.e. most real leads), so the call never
+  // started at all. Found via a live test call, not a hypothetical.
+  firstName: z.string().nullable().optional(),
+  lastName: z.string().nullable().optional(),
+  age: z.number().int().nullable().optional(),
+  state: z.string().length(2).nullable().optional(),
+  productLine: ProductLineSchema.nullable().optional(),
+  consentStatus: ConsentStatusSchema.nullable().optional(),
+  score: z.number().int().min(0).max(100).nullable().optional(),
+  enrichment: z.record(z.unknown()).nullable().optional(),
+  triageBucket: z.string().nullable().optional(),
+  acquisitionPlan: z.array(AcquisitionTaskSchema).nullable().optional(),
 });
 export type LeadContext = z.infer<typeof LeadContextSchema>;
 
@@ -164,6 +173,12 @@ export interface ProspectProfile {
   transcript_summary: string;
   risk_flags: string[];
   unanswered_questions: string[];
+  /** Fields stored without a verified transcript behind them, or only after
+   *  the prospect confirmed a poorly-heard value on read-back. Normally
+   *  empty. A licensed agent should re-confirm anything listed here before
+   *  relying on it — this is the difference between a record that is accurate
+   *  and one that is merely complete. */
+  unverified_fields: string[];
 }
 
 /**
@@ -189,6 +204,57 @@ export interface SessionState {
   appointmentBooked: boolean;
   /** Fields captured from the prospect, keyed by captureKey. Source of the profile. */
   captured: Record<string, unknown>;
+  /** Finalized transcripts of the PROSPECT's own speech, in order. The
+   *  evidence base a captured slot must be traceable to — a value that
+   *  matches nothing here was never actually said. `confidence` is the mean
+   *  per-token probability from transcription logprobs, or null when the API
+   *  sent none (unscored — which is not the same as confident). */
+  userTranscripts: Array<{ text: string; at: number; confidence?: number | null }>;
+  /** Provenance for every stored slot: the prospect's own words, when it was
+   *  captured, how sure the transcriber was, and whether it was verified
+   *  against a transcript. */
+  captureEvidence: Record<
+    string,
+    {
+      heardVerbatim: string;
+      at: number;
+      grounding: "grounded" | "unverifiable";
+      /** Mean per-token probability of the supporting transcript, or null. */
+      confidence?: number | null;
+      /** Transcript excerpt the value was traced to. */
+      matched?: string;
+    }
+  >;
+  /** When the prospect's most recent turn of speech ended. A capture made
+   *  after this must be judged against a transcript of THAT turn, not merely
+   *  whatever had arrived earlier. Null before the prospect has spoken. */
+  lastSpeechEndedAt?: number | null;
+  /** True once any transcript has arrived on this call — i.e. transcription
+   *  is demonstrably working. Distinguishes "this turn produced no words"
+   *  (suspicious) from "transcription is not running at all" (degraded, and
+   *  not the model's fault). */
+  transcriptionEverSeen?: boolean;
+  /** Waits until a transcript finalized at/after `sinceMs` is available, or
+   *  until `timeoutMs` elapses. Supplied by the realtime handler; absent in
+   *  unit tests, where transcripts are seeded up front. */
+  waitForTranscriptSince?: (sinceMs: number, timeoutMs: number) => Promise<void>;
+  /** Every required slot's position in UNKNOWN → HEARD → CONFIRMED. Only a
+   *  CONFIRMED slot has a value, and only a CONFIRMED slot appears in
+   *  `captured`. A HEARD slot holds a candidate awaiting read-back. */
+  slots?: Record<string, SlotRecord>;
+  /** The turn gate's ruling on the prospect's most recent turn. A capture
+   *  claimed from a turn where nothing usable was heard is refused whatever
+   *  the model reports, so noise can never reach a slot by a second route. */
+  turnVerdict?: {
+    outcome: TurnOutcome;
+    reason: string;
+    /** What the assistant's last question was looking for. */
+    expectation: QuestionExpectation;
+    at: number;
+  } | null;
+  /** The assistant's last spoken question and the answer shape it implies —
+   *  read from what she actually said out loud, not from the agenda. */
+  pendingQuestion?: { text: string; expectation: QuestionExpectation; at: number } | null;
   /** Objections raised during the call, in order. */
   objections: Array<{ objectionType: string; text: string }>;
   /** Set once book_appointment succeeds, so a repeat call is a no-op (no second POST/SMS). */

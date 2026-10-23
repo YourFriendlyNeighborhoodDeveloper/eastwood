@@ -35,3 +35,10 @@ http_requests_total = Counter(
     "Total HTTP requests",
     ["method", "path", "status"],
 )
+
+# result: sent | skipped_no_destination | skipped_no_client | duplicate | failed
+agent_brief_sms_total = Counter(
+    "eastwood_agent_brief_sms_total",
+    "Appointment handoff SMS attempts, by outcome",
+    ["result"],
+)

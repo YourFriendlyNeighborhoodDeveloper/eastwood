@@ -34,6 +34,8 @@ function makeSession(captured: Record<string, unknown>): SessionState {
     appointment: null,
     dncCaptured: false,
     callEndedPublished: false,
+    userTranscripts: [],
+    captureEvidence: {},
   } as unknown as SessionState;
 }
 

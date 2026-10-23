@@ -53,6 +53,8 @@ function makeSession(lead: LeadContext, captured: Record<string, unknown>): Sess
     appointment: null,
     dncCaptured: false,
     callEndedPublished: false,
+    userTranscripts: [],
+    captureEvidence: {},
   } as unknown as SessionState;
 }
 

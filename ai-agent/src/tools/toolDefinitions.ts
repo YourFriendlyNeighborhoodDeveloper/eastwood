@@ -239,11 +239,25 @@ export const ALL_TOOLS: ToolDefinition[] = [
   {
     name: "update_lead_field",
     description:
-      "Record a field captured from the prospect during the data collection agenda. " +
-      "Call this immediately after the prospect answers each question.",
+      "Record a field the prospect ACTUALLY ANSWERED, in their own words. Call this " +
+      "only after you clearly heard their answer. If you did not hear it clearly, " +
+      "if the audio was cut off, if they talked over you, or if the answer was " +
+      "ambiguous — do NOT call this. Ask them to repeat instead. The capture is " +
+      "verified against the call transcript and will be rejected if the prospect " +
+      "did not say it.\n\n" +
+      "Call this BEFORE acknowledging the answer out loud — it is instant, and its " +
+      "reply tells you which of three states the slot is in. Only CONFIRMED means " +
+      "you have the answer:\n" +
+      "  captured:true (CONFIRMED) — stored. Now you may acknowledge it and ask the " +
+      "next question.\n" +
+      "  needsConfirmation:true (HEARD) — something was said but it is not certain. " +
+      "Nothing is stored. Read the value back, get a plain yes, then call this again " +
+      "with confirmed=true.\n" +
+      "  rejected:true (UNKNOWN) — no answer was heard. Nothing is stored. Do not " +
+      "thank them and do not move on; ask them to repeat.",
     parameters: {
       type: "object",
-      required: ["field", "captureKey", "value"],
+      required: ["field", "captureKey", "value", "heardVerbatim"],
       properties: {
         field: {
           type: "string",
@@ -256,9 +270,26 @@ export const ALL_TOOLS: ToolDefinition[] = [
         value: {
           description: "The captured value. Use the valueHint from the agenda for format guidance.",
         },
+        heardVerbatim: {
+          type: "string",
+          description:
+            "REQUIRED. The prospect's own words that gave you this value, quoted as " +
+            "closely as you heard them — not a paraphrase, not a summary, not the " +
+            "parsed value. This is checked against the call transcript; if the " +
+            "prospect did not say it, the capture is rejected. If you cannot quote " +
+            "them, you did not hear an answer: ask again instead of calling this.",
+        },
+        confirmed: {
+          type: "boolean",
+          description:
+            "Set true ONLY when a previous call to this tool asked you to confirm " +
+            "this value, you read it back to the prospect out loud, and they " +
+            "agreed it was right. Never set it on a first attempt, and never to " +
+            "get a rejected value accepted.",
+        },
         rawText: {
           type: "string",
-          description: "The prospect's verbatim response, for audit purposes",
+          description: "Deprecated alias for heardVerbatim. Prefer heardVerbatim.",
         },
       },
     },

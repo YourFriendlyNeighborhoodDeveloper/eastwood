@@ -3,7 +3,10 @@ import { z } from "zod";
 import type { KafkaBridge } from "../bridge/kafkaBridge.js";
 import { loadConfig } from "../config.js";
 import { coreFetch } from "../coreClient.js";
-import { logger, toolInvocations } from "../observability.js";
+import { logger, slotCaptures, slotTransitions, toolInvocations } from "../observability.js";
+import { checkGrounding } from "../discovery/transcriptGrounding.js";
+import { answersExpectation, quoteSupportsChoice } from "../discovery/turnGate.js";
+import { emptySlot, judgeCapture, slotState } from "../discovery/slotState.js";
 import { PolicyEngine } from "../policy/policyEngine.js";
 import type { AcquisitionTask, LeadContext, ProductLine, Quote, QuoteOption, SessionState } from "../types.js";
 import { QuoteOptionSchema } from "../types.js";
@@ -838,8 +841,216 @@ export const toolHandlers: Record<string, ToolHandler> = {
         captureKey: z.string(),
         value: z.unknown(),
         rawText: z.string().optional(),
+        heardVerbatim: z.string().optional(),
+        confirmed: z.boolean().optional(),
       })
       .parse(input);
+
+    const cfg = loadConfig();
+
+    // A slot may only be stored if it traces to words the prospect was
+    // actually transcribed as saying. Without this, a clipped or noisy
+    // utterance gets silently completed by the model and stored as though it
+    // were an answer — the qualification record then contains things the
+    // prospect never said. UNKNOWN is an acceptable outcome; invented is not.
+    //
+    // Transcription is ASYNCHRONOUS and routinely finalizes AFTER the model
+    // has already called this tool. Ruling immediately would therefore judge
+    // the capture on evidence that had not arrived yet — rejecting answers the
+    // prospect gave perfectly clearly and sending Imogen back to re-ask them.
+    // Wait for this turn's words to land before deciding anything.
+    if (session.waitForTranscriptSince && session.lastSpeechEndedAt) {
+      await session.waitForTranscriptSince(session.lastSpeechEndedAt, cfg.transcriptWaitMs);
+    }
+
+    const claim = parsed.heardVerbatim ?? parsed.rawText;
+    // A read-back quotes the ORIGINAL turn ("sixty-eight, is that right?" →
+    // "Yes"), so its evidence is legitimately one turn old and is bounded
+    // instead by requiring the slot to already be HEARD. Every other capture
+    // must be justified by the turn it is answering.
+    const grounding = checkGrounding(claim, session.userTranscripts, {
+      since: parsed.confirmed === true ? null : session.lastSpeechEndedAt,
+    });
+
+    // ── The gate's ruling on the turn this capture is claimed from ──────────
+    // The turn gate has already decided whether the prospect said anything
+    // usable, using evidence the model does not have (finalization, recognition
+    // confidence, whether it was speech at all). A capture claimed from a turn
+    // it ruled empty is refused outright — otherwise noise reaches the record
+    // by a second route, via a quote that happens to match something the
+    // prospect said several questions ago.
+    const verdict = session.turnVerdict;
+    const verdictIsCurrent =
+      verdict != null &&
+      (session.lastSpeechEndedAt == null || verdict.at >= session.lastSpeechEndedAt);
+    const turnWasHeard = !verdictIsCurrent || verdict!.outcome !== "not_heard";
+
+    // "Semantically answers the question" for the two cases it can be judged
+    // deterministically:
+    //
+    //   yes/no — needs a yes, a no, or a qualified answer ("I quit", "only
+    //     occasionally"). This is the "was that a yes or a no?" beat.
+    //   choice — the answer IS one of the alternatives, so the value must
+    //     appear in the words quoted. checkGrounding only proves the QUOTE was
+    //     said; it never checks the quote has anything to do with the value,
+    //     so without this a capture can quote "Thank you." (which whisper
+    //     hallucinates onto silence) and store "burial" as CONFIRMED.
+    //
+    // Anything else is held for read-back rather than stored. With no pending
+    // question there is nothing to judge it against.
+    const expectation = session.pendingQuestion?.expectation ?? "none";
+    const answersQuestion =
+      expectation === "yes_no"
+        ? answersExpectation(claim ?? "", "yes_no")
+        : expectation === "choice"
+          ? quoteSupportsChoice(parsed.value, claim ?? null)
+          : true;
+
+    const priorState = slotState(session.slots, parsed.captureKey);
+    const judgement = judgeCapture({
+      grounding,
+      confidence: grounding.status === "grounded" ? grounding.confidence : null,
+      confidenceMin: cfg.transcriptConfidenceMin,
+      answersQuestion,
+      readBackConfirmed: parsed.confirmed === true,
+      priorState,
+      allowUnverifiable: !cfg.captureRequireTranscript,
+      turnWasHeard,
+    });
+
+    const confidence = grounding.status === "grounded" ? grounding.confidence : null;
+    const slots = (session.slots ??= {});
+    const slot = (slots[parsed.captureKey] ??= emptySlot(parsed.captureKey, parsed.field));
+    slot.attempts += 1;
+    slot.updatedAt = Date.now();
+    slot.heardVerbatim = claim ?? "";
+    slot.confidence = confidence;
+    slot.matched = grounding.status === "grounded" ? grounding.matched : null;
+    if (priorState !== judgement.next) {
+      slotTransitions.inc({
+        from: priorState,
+        to: judgement.next,
+        capture_key: parsed.captureKey,
+      });
+    }
+
+    // ── UNKNOWN: nothing usable. Ask again; store nothing. ──────────────────
+    if (judgement.next === "UNKNOWN") {
+      slot.state = "UNKNOWN";
+      slot.candidate = undefined;
+      slot.blockedReason = judgement.reason;
+      slotCaptures.inc({
+        result: !turnWasHeard
+          ? "rejected_turn_not_heard"
+          : grounding.status === "unverifiable"
+            ? "rejected_no_transcript"
+            : "rejected_ungrounded",
+        capture_key: parsed.captureKey,
+      });
+      logger.warn(
+        {
+          sessionId,
+          captureKey: parsed.captureKey,
+          claimed: claim ?? null,
+          slotState: "UNKNOWN",
+          attempts: slot.attempts,
+          reason: judgement.reason,
+        },
+        "slot capture refused — the slot stays UNKNOWN"
+      );
+      return {
+        captured: false,
+        rejected: true,
+        slotState: "UNKNOWN",
+        reason: judgement.reason,
+        nextStep:
+          "Do NOT record this. You did not clearly hear an answer. Say so " +
+          'naturally — "Sorry, I didn\'t catch that — could you say it again?" ' +
+          "— and wait for their reply. Do NOT thank them, do NOT say " +
+          '"Perfect" or "Got it", and do NOT move to the next question. Never ' +
+          "fill in a value you did not hear.",
+      };
+    }
+
+    // ── HEARD: something was said, but it is not safe to trust yet. ─────────
+    // The value is held as a CANDIDATE — not written to `captured`, not
+    // visible to the quote engine, not on the handoff brief. This is the
+    // difference between "something was said" and "I know what was said", and
+    // storing anyway is how a mis-heard number becomes a permanent,
+    // unquestioned fact on the record.
+    if (judgement.next === "HEARD") {
+      slot.state = "HEARD";
+      slot.candidate = parsed.value;
+      slot.blockedReason = judgement.reason;
+      slotCaptures.inc({ result: "confirmation_required", capture_key: parsed.captureKey });
+      logger.warn(
+        {
+          sessionId,
+          captureKey: parsed.captureKey,
+          confidence,
+          claimed: claim ?? null,
+          slotState: "HEARD",
+          attempts: slot.attempts,
+          reason: judgement.reason,
+        },
+        "slot capture held at HEARD — not confirmed, so nothing is stored"
+      );
+      const readBack =
+        expectation === "yes_no" && !answersQuestion
+          ? `"Sorry — was that a yes or a no?"`
+          : `"Just to make sure I've got this right — ${String(parsed.value)}, is that correct?"`;
+      return {
+        captured: false,
+        needsConfirmation: true,
+        slotState: "HEARD",
+        confidence,
+        reason: judgement.reason,
+        nextStep:
+          `Not stored — this slot is HEARD, not CONFIRMED. Do NOT thank them for ` +
+          `it and do NOT move to the next question. Read it back and get a plain ` +
+          `yes: ${readBack} Wait for their answer. If they confirm, call this again ` +
+          `with confirmed=true. If they correct you, call it with the corrected ` +
+          `value. Nothing is recorded until this is settled.`,
+      };
+    }
+
+    // ── CONFIRMED: the only state that stores anything. ─────────────────────
+    const groundingStatus = grounding.status === "grounded" ? "grounded" : "unverifiable";
+    if (groundingStatus === "unverifiable") {
+      // No transcript has arrived on this call at all, even after waiting —
+      // transcription itself is down, not merely late, so nothing can be
+      // verified either way. Under captureRequireTranscript the slot stayed
+      // UNKNOWN above; here the value is kept but permanently marked
+      // unverified, and the alert fires now rather than being discovered in
+      // the CRM later. See the config comment for why lenient is the default.
+      logger.error(
+        { sessionId, captureKey: parsed.captureKey, claimed: claim ?? null },
+        "slot stored WITHOUT transcript verification — input transcription produced " +
+          "nothing on this call; every capture on it is unverified"
+      );
+    }
+
+    slot.state = "CONFIRMED";
+    slot.value = parsed.value;
+    slot.candidate = undefined;
+    slot.blockedReason = null;
+
+    session.captureEvidence[parsed.captureKey] = {
+      heardVerbatim: claim ?? "",
+      at: Date.now(),
+      grounding: judgement.unverified ? "unverifiable" : "grounded",
+      confidence,
+      ...(grounding.status === "grounded" ? { matched: grounding.matched } : {}),
+    };
+    slotCaptures.inc({
+      result:
+        groundingStatus === "unverifiable"
+          ? "unverifiable_no_transcript"
+          : judgement.unverified
+            ? "confirmed_after_readback"
+            : "grounded",
+      capture_key: parsed.captureKey,
+    });
 
     await bridge.publishEvent({
       eventType: "field_captured",
@@ -853,6 +1064,15 @@ export const toolHandlers: Record<string, ToolHandler> = {
     // Retain the captured value on the session — this is what the quote gate and
     // the handoff profile read. Without it the profile could only be invented.
     session.captured[parsed.captureKey] = parsed.value;
+
+    // The question this answered is settled, so it stops being the outstanding
+    // one. Nothing else clears it: notePendingQuestion only fires on a turn
+    // where she asks something, and the turn that records an answer usually
+    // asks nothing ("Let me get that recorded.") — so the answered question
+    // would stay pending and the NEXT turn gets judged against it. A prospect
+    // who then says "mhm" while she works is ruled to have failed to answer a
+    // question they already answered, and she asks it again.
+    session.pendingQuestion = null;
 
     // Remove from the local acquisition plan so pushSessionUpdate reflects progress
     if (lead.acquisitionPlan) {
@@ -876,6 +1096,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
     const missing = quoteReady ? [] : missingForQuote(lead, session);
     return {
       captured: true,
+      slotState: "CONFIRMED",
       field: parsed.field,
       remainingFields: remaining,
       nextQuestion: remaining > 0 ? (lead.acquisitionPlan?.[0]?.question ?? null) : null,

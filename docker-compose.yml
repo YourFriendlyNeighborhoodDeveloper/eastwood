@@ -110,6 +110,7 @@ services:
       EASTWOOD_TWILIO_ACCOUNT_SID: ${EASTWOOD_TWILIO_ACCOUNT_SID:-}
       EASTWOOD_TWILIO_AUTH_TOKEN: ${EASTWOOD_TWILIO_AUTH_TOKEN:-}
       EASTWOOD_TWILIO_FROM_NUMBER: ${EASTWOOD_TWILIO_FROM_NUMBER:-}
+      AGENT_NOTIFICATION_PHONE_E164: ${AGENT_NOTIFICATION_PHONE_E164:-}
       SCORE_HOT_THRESHOLD: ${SCORE_HOT_THRESHOLD:-75}
       BYPASS_TCPA: ${BYPASS_TCPA:-false}
       RESET_RATE_TABLE_ON_BOOT: ${RESET_RATE_TABLE_ON_BOOT:-false}
@@ -153,6 +154,34 @@ services:
       EASTWOOD_TWILIO_FROM_NUMBER: ${EASTWOOD_TWILIO_FROM_NUMBER:-}
       SCORE_HOT_THRESHOLD: ${SCORE_HOT_THRESHOLD:-75}
       BYPASS_TCPA: ${BYPASS_TCPA:-false}
+      # Turn-taking and capture-integrity tuning. Exposed here so a live call
+      # can be adjusted without a rebuild; values shown are the shipped defaults.
+      VAD_SILENCE_DURATION_MS: ${VAD_SILENCE_DURATION_MS:-900}
+      VAD_THRESHOLD: ${VAD_THRESHOLD:-0.6}
+      VAD_PREFIX_PADDING_MS: ${VAD_PREFIX_PADDING_MS:-500}
+      REALTIME_TRANSCRIBE_MODEL: ${REALTIME_TRANSCRIBE_MODEL:-gpt-4o-transcribe}
+      REALTIME_TRANSCRIBE_LOGPROBS: ${REALTIME_TRANSCRIBE_LOGPROBS:-true}
+      TRANSCRIPT_WAIT_MS: ${TRANSCRIPT_WAIT_MS:-2500}
+      TRANSCRIPT_CONFIDENCE_MIN: ${TRANSCRIPT_CONFIDENCE_MIN:-0.6}
+      # Turn gate. On, the assistant may not speak until the turn has been
+      # ruled on, so silence and noise can never be acknowledged as an answer.
+      # Off restores VAD-driven responses — the behaviour that produced
+      # "Perfect, thanks." over an empty turn. Roll back only with that in mind.
+      TURN_GATE_ENABLED: ${TURN_GATE_ENABLED:-true}
+      # Ceiling on waiting for a turn's transcript before ruling. The gate
+      # closes the moment the transcript lands, so this is a tail bound, not a
+      # per-turn delay. Raise if clear answers get sent back for a repeat;
+      # lower if a genuine silence takes too long to come back with a question.
+      TURN_GATE_MAX_WAIT_MS: ${TURN_GATE_MAX_WAIT_MS:-1500}
+      # Consecutive unanswered turns before she stops saying "could you repeat
+      # that" and names the line problem instead.
+      TURN_GATE_ESCALATE_AFTER: ${TURN_GATE_ESCALATE_AFTER:-3}
+      # true = refuse every capture when transcription produced nothing all
+      # call, leaving slots UNKNOWN. Off by default: with transcription down it
+      # makes Imogen re-ask forever. See config.ts for the full trade-off.
+      CAPTURE_REQUIRE_TRANSCRIPT: ${CAPTURE_REQUIRE_TRANSCRIPT:-false}
+      WATCHDOG_STALL_MS: ${WATCHDOG_STALL_MS:-8000}
+      WATCHDOG_MAX_NUDGES: ${WATCHDOG_MAX_NUDGES:-2}
       
 
   nginx:

@@ -170,6 +170,17 @@ def test_provider_built_from_settings():
 
 
 def test_ryans_notification_number_is_the_settings_default():
-    # Spec: all agent notifications route to +13135550199, configured in one
-    # place — settings — never scattered through business logic.
-    assert Settings().agent_notification_phone_e164 == "+13135550199"
+    # Spec: all agent notifications route through settings.
+    # agent_notification_phone_e164, configured in exactly one place — never
+    # hardcoded or scattered through business logic. It must default to "",
+    # not a real-looking number: AppointmentNotificationService's fail-soft
+    # warning path (skip + log, never crash, never send to the wrong person)
+    # only fires when this is falsy. A non-empty default here is silently
+    # unrecoverable — bookings "succeed" and text whatever number is baked in
+    # here instead of the operator, with nothing to indicate anything is wrong.
+    assert Settings().agent_notification_phone_e164 == ""
+
+    # And the setting, not a hardcoded literal, is what actually reaches the
+    # notifier — set it and confirm it takes effect.
+    configured = Settings(agent_notification_phone_e164="+13135559000")
+    assert configured.agent_notification_phone_e164 == "+13135559000"

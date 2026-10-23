@@ -112,7 +112,13 @@ class Settings(BaseSettings):
     # appointment brief here. Business logic must read this setting — the number
     # is configured in exactly one place. If cleared, sends are skipped with a
     # warning and the full profile remains retrievable from the DB.
-    agent_notification_phone_e164: str = "+13135550199"
+    #
+    # Must default to "" — AppointmentNotificationService's fail-soft warning
+    # path only fires when this is falsy. A non-empty default here is silently
+    # unrecoverable: bookings "succeed" and send real SMS to whatever this
+    # value is instead of to Ryan, with no error anywhere. (Previously
+    # hardcoded to a stray number; see docs/go-live-checklist.md §6.)
+    agent_notification_phone_e164: str = ""
 
     # ── Calendly scheduling ──────────────────────────────────────────────────
     # When enabled, appointments are booked against Ryan's real Calendly event

@@ -57,6 +57,8 @@ function makeSession(): SessionState {
     appointment: null,
     dncCaptured: false,
     callEndedPublished: false,
+    userTranscripts: [],
+    captureEvidence: {},
   } as unknown as SessionState;
 }
 

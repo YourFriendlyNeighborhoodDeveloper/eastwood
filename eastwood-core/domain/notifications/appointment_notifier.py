@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Protocol
 
+from metrics.metrics import agent_brief_sms_total
+
 logger = logging.getLogger(__name__)
 
 _UNKNOWN = "unknown"
@@ -123,6 +125,17 @@ def format_agent_brief(profile: dict) -> str:
         if rel != _UNKNOWN:
             beneficiary = f"{beneficiary} ({rel})"
 
+    # Only rendered when something is actually unverified. On a healthy call
+    # this is empty and the brief is unchanged; when it is not, the agent has
+    # to see it before quoting off these numbers, because a value captured
+    # from unclear audio looks exactly like one captured cleanly.
+    unverified = profile.get("unverified_fields") or []
+    verify_block = (
+        ["", "⚠ VERIFY BEFORE QUOTING (not clearly heard):", "; ".join(str(f) for f in unverified)]
+        if unverified
+        else []
+    )
+
     return "\n".join([
         "NEW EASTWOOD APPOINTMENT",
         "",
@@ -152,6 +165,7 @@ def format_agent_brief(profile: dict) -> str:
         "",
         "Open questions:",
         _list_line(profile, "unanswered_questions"),
+        *verify_block,
         "",
         "Call summary:",
         _val(profile, "transcript_summary"),
@@ -171,10 +185,16 @@ class AppointmentNotificationService:
         self._destination = destination
 
     def send_agent_brief(self, profile: dict, *, appointment_id: str | None = None) -> bool:
-        """Return True iff a brief was sent on this call."""
+        """Return True iff a brief was sent on this call.
+
+        Every exit path is logged and counted (eastwood_agent_brief_sms_total)
+        so a booking that produced no SMS is always visible in metrics/logs,
+        never a silent no-op.
+        """
         key = appointment_id or f"{profile.get('lead_id')}:{profile.get('appointment_time')}"
         if key in AppointmentNotificationService._notified:
             logger.info("agent brief already sent for %s — skipping duplicate", key)
+            agent_brief_sms_total.labels(result="duplicate").inc()
             return False
 
         if not self._destination:
@@ -182,17 +202,27 @@ class AppointmentNotificationService:
                 "AGENT_NOTIFICATION_PHONE_E164 not set — appointment booked but no agent "
                 "brief sent; profile persisted for lead %s", profile.get("lead_id"),
             )
+            agent_brief_sms_total.labels(result="skipped_no_destination").inc()
             return False
         if self._sms is None:
             logger.warning("SMS client not configured — agent brief skipped for lead %s", profile.get("lead_id"))
+            agent_brief_sms_total.labels(result="skipped_no_client").inc()
             return False
 
         try:
-            self._sms.send(self._destination, format_agent_brief(profile))
+            sid = self._sms.send(self._destination, format_agent_brief(profile))
         except Exception:
-            logger.exception("failed to send agent brief for lead %s", profile.get("lead_id"))
+            logger.exception(
+                "failed to send agent brief for appointment %s (lead %s) to %s",
+                key, profile.get("lead_id"), self._destination,
+            )
+            agent_brief_sms_total.labels(result="failed").inc()
             return False
 
         AppointmentNotificationService._notified.add(key)
-        logger.info("agent brief sent for appointment %s (lead %s)", key, profile.get("lead_id"))
+        logger.info(
+            "agent brief sent for appointment %s (lead %s) to %s (sms_sid=%s)",
+            key, profile.get("lead_id"), self._destination, sid,
+        )
+        agent_brief_sms_total.labels(result="sent").inc()
         return True

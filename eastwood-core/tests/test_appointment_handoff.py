@@ -94,6 +94,26 @@ def test_brief_never_invents_missing_fields():
     assert "unknown" in brief  # missing fields read as unknown, not fabricated
 
 
+def test_brief_flags_fields_that_were_not_clearly_heard():
+    # A value captured from unclear audio looks identical to a cleanly heard
+    # one in the brief. The agent has to be told which is which before they
+    # quote off it, or a mis-heard number becomes an unquestioned fact.
+    p = {**PROFILE, "unverified_fields": ["tobacco", "height_weight"]}
+    brief = format_agent_brief(p)
+
+    assert "VERIFY BEFORE QUOTING" in brief
+    assert "tobacco" in brief
+    assert "height_weight" in brief
+
+
+def test_brief_stays_clean_when_everything_was_heard_clearly():
+    # The normal case must not carry a scary empty warning block.
+    assert "VERIFY BEFORE QUOTING" not in format_agent_brief(PROFILE)
+    assert "VERIFY BEFORE QUOTING" not in format_agent_brief(
+        {**PROFILE, "unverified_fields": []}
+    )
+
+
 # ── The notification service ──────────────────────────────────────────────────
 
 def test_successful_send_delivers_one_sms():
