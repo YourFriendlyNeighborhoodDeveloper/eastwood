@@ -166,7 +166,7 @@ permitted.
 
 ## 5. Public webhook infrastructure
 
-### Completed — webhook authentication and API auth (commit `aa01d2f`)
+### Completed — webhook authentication and API auth (commit `6f2cff8`)
 
 Implemented and verified 2026-07-16. Do not re-audit; re-verify only if these
 surfaces change. The policy lives in `eastwood-core/api/security.py` and its
@@ -356,7 +356,7 @@ are configuration, credentials, or data:
       remain in git history (§1).
 - [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel (§5).
       Webhook signature validation and API authentication are implemented and
-      verified (commit `aa01d2f`); the URL itself is the remaining gap.
+      verified (commit `6f2cff8`); the URL itself is the remaining gap.
 - [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
       the formula adapter; carrier rate tables are not loaded (§4).
 - [ ] **Production-safe environment values** — confirm `APP_ENV=production`,
