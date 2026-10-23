@@ -42,3 +42,6 @@ __pycache__/
 ._*
 Thumbs.db
 desktop.ini
+
+# Local AI-assistant working files
+.claude/
