@@ -40,6 +40,14 @@ Conventions:
       `~/Desktop/Eastwood-pre-scrub-2026-07-16.bundle` holds the un-scrubbed
       history (secrets + lead PII) as a safety net for the rewrite. Once the
       old credentials are confirmed dead and the repo state is good, remove it.
+- [x] **Phone number scrubbed (2026-10-22), before the first push.** A real
+      phone number hardcoded as the agent-notification default (settings,
+      legacy `config/config.yaml`, and three test files) was replaced in
+      every commit with `git filter-repo`; tests now use a fictional
+      `555-01xx` number. Every commit SHA changed again.
+- [ ] **Delete the second backup once the GitHub repo is verified.**
+      `~/Desktop/Eastwood-pre-phone-scrub-2026-10-22.bundle` still holds the
+      number.
 
 ---
 
@@ -158,7 +166,7 @@ permitted.
 
 ## 5. Public webhook infrastructure
 
-### Completed — webhook authentication and API auth (commit `3da7a67`)
+### Completed — webhook authentication and API auth (commit `aa01d2f`)
 
 Implemented and verified 2026-07-16. Do not re-audit; re-verify only if these
 surfaces change. The policy lives in `eastwood-core/api/security.py` and its
@@ -348,7 +356,7 @@ are configuration, credentials, or data:
       remain in git history (§1).
 - [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel (§5).
       Webhook signature validation and API authentication are implemented and
-      verified (commit `3da7a67`); the URL itself is the remaining gap.
+      verified (commit `aa01d2f`); the URL itself is the remaining gap.
 - [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
       the formula adapter; carrier rate tables are not loaded (§4).
 - [ ] **Production-safe environment values** — confirm `APP_ENV=production`,
