@@ -2,6 +2,8 @@
 
 **A compliance-first AI outbound sales platform for insurance agencies.**
 
+**Live overview:** [eastwood-two.vercel.app](https://eastwood-two.vercel.app)
+
 Eastwood takes purchased or inbound leads, decides who may lawfully be called and who is worth calling, and has **Imogen**, a realtime AI voice assistant, run the discovery call. She screens health, presents deterministic quotes, and books the prospect with a licensed human agent who closes. Every step is gated in code, not by prompting the model to behave.
 
 > **Status: pre-launch.** The application is built and test-verified (453 tests passing). The remaining go-live work is configuration, credentials, and data; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md).
