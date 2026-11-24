@@ -319,6 +319,10 @@ class CarrierRateTable(Base):
     effective_date: Mapped[datetime] = mapped_column(Date, nullable=False)
     expires_date: Mapped[datetime | None] = mapped_column(Date)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    # Provenance of the rate sheet, e.g. "Transamerica FE rate sheet 2026-01".
+    # Rows without one — and the synthetic sample rows tagged "synthetic_seed"
+    # — are never quoted as carrier rates (domain.quoting.adapters.rate_table).
+    source: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -353,3 +357,22 @@ class LeadFieldEvent(Base):
     call_id: Mapped[str | None] = mapped_column(String(64))
     confidence: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutboundControlEvent(Base):
+    """Append-only log of campaign authorizations and halts (domain.outbound).
+
+    The latest row per tenant is the live state. No row at all means the
+    campaign has never been authorized, which is treated as halted — a fresh
+    deployment contacts nobody until an operator explicitly resumes it.
+    """
+    __tablename__ = "outbound_control_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)  # halt | resume
+    operator: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )

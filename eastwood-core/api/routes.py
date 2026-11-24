@@ -922,6 +922,38 @@ async def twilio_status_callback(
     return result
 
 
+@router.post("/twilio/sms")
+async def twilio_inbound_sms(request: Request, session: AsyncSession = Depends(get_session)):
+    """Inbound SMS webhook (configure as the Twilio number's "A message comes in"
+    URL: {PUBLIC_BASE_URL}/twilio/sms). Signature-validated like every /twilio
+    route. A texted opt-out suppresses the number for calls and texts and
+    cancels everything pending for it. Returns empty TwiML — Twilio's own
+    opt-out handling sends the carrier-required confirmation."""
+    from starlette.responses import Response as StarletteResponse
+
+    from domain.compliance.sms_opt_out import apply_opt_out, is_opt_out
+    from domain.normalization import normalize_phone
+
+    form = await request.form()
+    phone = normalize_phone(str(form.get("From", "")))
+    body = str(form.get("Body", ""))
+    if phone and is_opt_out(body):
+        result = await apply_opt_out(
+            session, pinned_tenant_id(), phone,
+            note=f"SMS opt-out, MessageSid={str(form.get('MessageSid', ''))[:64]}",
+        )
+        await session.commit()
+        logger.warning(
+            "inbound SMS opt-out processed: leads=%d cancelled_dials=%d cancelled_followups=%d new=%s",
+            result["leads"], result["cancelled_dials"], result["cancelled_followups"],
+            result["newly_suppressed"],
+        )
+    return StarletteResponse(
+        content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
+        media_type="application/xml",
+    )
+
+
 _ai_agent_client = None
 
 
@@ -962,3 +994,60 @@ async def dashboard_summary(
         "by_band": band_counts,
         "by_status": status_counts,
     }
+
+
+# ── Outbound campaign control (arm / authorize / emergency halt) ──────────────
+
+def _control_body_fields(body: Any) -> tuple[str, str]:
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="JSON object body required")
+    operator = str(body.get("operator") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    if not operator or not reason:
+        raise HTTPException(status_code=422, detail="operator and reason are required")
+    return operator[:128], reason[:2000]
+
+
+@router.get("/api/outbound/status")
+async def outbound_status(session: AsyncSession = Depends(get_session)):
+    """Whether prospect-facing outbound is permitted, and who last changed it."""
+    from domain.outbound import get_outbound_state
+
+    state = await get_outbound_state(session, pinned_tenant_id())
+    return state.as_dict()
+
+
+@router.post("/api/outbound/halt")
+async def outbound_halt(request: Request, session: AsyncSession = Depends(get_session)):
+    """Emergency stop. Always accepted. The dialer stops on its next pass (≤3s)
+    and the follow-up worker on its next pass (≤30s); calls already connected
+    finish normally."""
+    from domain.outbound import halt_outbound
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    operator, reason = _control_body_fields(body)
+    state = await halt_outbound(session, operator=operator, reason=reason, tenant_id=pinned_tenant_id())
+    await session.commit()
+    return state.as_dict()
+
+
+@router.post("/api/outbound/resume")
+async def outbound_resume(request: Request, session: AsyncSession = Depends(get_session)):
+    """Authorize the campaign (the runtime half of the two-key launch).
+    409 when the deployment is not armed (OUTBOUND_ENABLED=false)."""
+    from domain.outbound import OutboundNotArmedError, resume_outbound
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    operator, reason = _control_body_fields(body)
+    try:
+        state = await resume_outbound(session, operator=operator, reason=reason, tenant_id=pinned_tenant_id())
+    except OutboundNotArmedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await session.commit()
+    return state.as_dict()

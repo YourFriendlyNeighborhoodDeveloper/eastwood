@@ -212,6 +212,13 @@ async def test_unknown_status_never_enters_the_dial_queue(monkeypatch):
     assert await _try_enqueue(monkeypatch, UNKNOWN) is False
 
 
+async def test_refused_unknown_lead_does_not_claim_to_be_dialing(monkeypatch):
+    """Routing writes status=dialing before the DNC refusal; the refusal must
+    correct it, or reporting shows a lead 'dialing' that never will be."""
+    await _try_enqueue(monkeypatch, UNKNOWN)
+    assert _FakeLeadRepo.statuses[-1] == (LEAD_ID, "awaiting_dnc_clearance")
+
+
 async def test_blocked_status_never_enters_the_dial_queue(monkeypatch):
     assert await _try_enqueue(monkeypatch, BLOCKED) is False
 
@@ -268,8 +275,13 @@ class _DialLoopQueueRepo(_FakeDialQueueRepo):
         _DialLoopQueueRepo.dialing.append(entry_id)
 
 
-async def _drain_dial_queue(monkeypatch, status: str) -> tuple[int, list]:
-    """Run one pass of process_dial_queue for a lead with the given clearance."""
+async def _drain_dial_queue(
+    monkeypatch, status: str, outbound: tuple[bool, str] = (True, "permitted")
+) -> tuple[int, list]:
+    """Run one pass of process_dial_queue for a lead with the given clearance.
+
+    ``outbound`` is what the campaign gate (domain.outbound) answers.
+    """
     import domain.tcpa as tcpa_mod
     import workers.brain as brain
 
@@ -282,6 +294,9 @@ async def _drain_dial_queue(monkeypatch, status: str) -> tuple[int, list]:
     monkeypatch.setattr(brain, "session_scope", _fake_session_scope)
     monkeypatch.setattr(brain, "LeadRepo", _FakeLeadRepo)
     monkeypatch.setattr(brain, "DialQueueRepo", _DialLoopQueueRepo)
+    async def _gate(session, tenant_id=None):
+        return outbound
+    monkeypatch.setattr(brain, "outbound_permitted", _gate)
     monkeypatch.setattr(tcpa_mod, "in_tcpa_window", lambda *a, **k: True)
     # process_dial_queue now re-checks entity suppression via SuppressionRepo.
     import repos.repos as repos_mod
@@ -324,6 +339,19 @@ async def test_dial_loop_dials_a_cleared_lead_when_other_gates_pass(monkeypatch,
     assert fired == 1
     assert dialed == [LEAD_ID]
     assert _DialLoopQueueRepo.terminal == []
+
+
+@pytest.mark.parametrize("reason", ["halted", "never_authorized", "outbound_disabled"])
+async def test_dial_loop_fires_nothing_while_the_campaign_gate_is_closed(monkeypatch, reason):
+    """Emergency halt / never authorized / disarmed: a cleared, due lead is not
+    dialed, and its queue entry is left untouched (not burned as terminal), so
+    it dials normally once the campaign is authorized again."""
+    fired, dialed = await _drain_dial_queue(monkeypatch, CLEAR, outbound=(False, reason))
+
+    assert fired == 0
+    assert dialed == []
+    assert _DialLoopQueueRepo.terminal == []
+    assert _DialLoopQueueRepo.dialing == []
 
 
 # ── Blocking cancels everything already scheduled ─────────────────────────────

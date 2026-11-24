@@ -1,0 +1,89 @@
+# Eastwood production overlay.
+#
+# Layered over docker-compose.yml with a SEPARATE env file and project name, so
+# the development stack (.env, project "eastwood", volume eastwood_pgdata) is
+# never touched:
+#
+#   cp .env.production.example .env.production   # fill in; chmod 600
+#   docker compose -p eastwood-prod --env-file .env.production \
+#     -f docker-compose.yml -f docker-compose.production.yml up -d --build
+#
+# Fail-closed layers:
+#   1. Compose refuses to start (`${VAR:?...}`) when a required value is unset.
+#   2. eastwood-core's boot guard (config/settings.py assert_production_safety)
+#      refuses to start on any unsafe value that reaches it: TCPA bypass, DNC
+#      test allowlist, non-FTC DNC provider or missing SAN/area codes, missing
+#      API key, disabled Twilio signature validation, rate-table reset, a
+#      non-HTTPS or temporary-tunnel PUBLIC_BASE_URL, thresholds below 75/50,
+#      or no ACTIVE_STATES.
+#   3. Outbound stays disarmed unless OUTBOUND_ENABLED=true, and even then
+#      contacts nobody until an operator authorizes the campaign at runtime
+#      (POST /api/outbound/resume); POST /api/outbound/halt stops it.
+#
+# Every host port binds to 127.0.0.1. Put a TLS-terminating reverse proxy or a
+# named tunnel in front of nginx (127.0.0.1:18000) at PUBLIC_BASE_URL; nothing
+# here listens publicly on its own.
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production (openssl rand -hex 24)}
+
+  prometheus:
+    ports: !override
+      - "127.0.0.1:19090:9090"
+
+  grafana:
+    ports: !override
+      - "127.0.0.1:13000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env.production}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+
+  eastwood-core:
+    ports: !override
+      - "127.0.0.1:18080:8080"
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://eastwood:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/eastwood
+      # Development escape hatches, pinned off regardless of the env file.
+      BYPASS_TCPA: "false"
+      DNC_TEST_ALLOWLIST: ""
+      RESET_RATE_TABLE_ON_BOOT: "false"
+      TWILIO_SIGNATURE_VALIDATION_ENABLED: "true"
+      # Required values: compose stops here if any is missing.
+      EASTWOOD_API_KEY: ${EASTWOOD_API_KEY:?set EASTWOOD_API_KEY (openssl rand -hex 32)}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL to the stable https URL Twilio will call}
+      DNC_SCRUB_PROVIDER: ftc_registry
+      DNC_SAN: ${DNC_SAN:?set DNC_SAN (FTC registry Subscription Account Number)}
+      DNC_AREA_CODES: ${DNC_AREA_CODES:?set DNC_AREA_CODES (subscribed area codes, comma-separated)}
+      DNC_REGISTRY_USERNAME: ${DNC_REGISTRY_USERNAME:?set DNC_REGISTRY_USERNAME}
+      DNC_REGISTRY_PASSWORD: ${DNC_REGISTRY_PASSWORD:?set DNC_REGISTRY_PASSWORD}
+      DNC_REGISTRY_DOWNLOAD_URL: ${DNC_REGISTRY_DOWNLOAD_URL:?set DNC_REGISTRY_DOWNLOAD_URL}
+      ACTIVE_STATES: ${ACTIVE_STATES:?set ACTIVE_STATES to every campaign state, e.g. MI}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:?set TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:?set TWILIO_AUTH_TOKEN}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:?set TWILIO_FROM_NUMBER}
+      AGENT_NOTIFICATION_PHONE_E164: ${AGENT_NOTIFICATION_PHONE_E164:?set AGENT_NOTIFICATION_PHONE_E164 (licensed agent)}
+      # Documented launch values; the boot guard refuses anything lower.
+      SCORE_HOT_THRESHOLD: ${SCORE_HOT_THRESHOLD:-75}
+      SCORE_WARM_THRESHOLD: ${SCORE_WARM_THRESHOLD:-50}
+      # First campaign: one call at a time.
+      MAX_CONCURRENT_CALLS: ${MAX_CONCURRENT_CALLS:-1}
+      DIAL_MAX_ATTEMPTS: ${DIAL_MAX_ATTEMPTS:-5}
+      OUTBOUND_ENABLED: ${OUTBOUND_ENABLED:-false}
+
+  ai-agent:
+    ports: !override
+      - "127.0.0.1:18081:8081"
+    environment:
+      AGENT_DATABASE_URL: postgresql://eastwood:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/agent
+      EASTWOOD_API_KEY: ${EASTWOOD_API_KEY:?set EASTWOOD_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
+      BYPASS_TCPA: "false"
+
+  nginx:
+    ports: !override
+      - "127.0.0.1:18000:80"

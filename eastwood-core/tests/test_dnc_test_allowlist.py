@@ -100,6 +100,7 @@ async def test_unknown_lead_is_refused_by_the_enqueue_gate(monkeypatch):
     class _LeadRepo:
         def __init__(self, s): pass
         async def get_by_id(self, _id): return _Lead()
+        async def update_status(self, lead_id, status): pass
 
     class _DQRepo:
         def __init__(self, s): pass
@@ -158,6 +159,10 @@ def test_boot_guard_allows_production_with_an_empty_allowlist():
         dnc_test_allowlist="",
         twilio_signature_validation_enabled=True,
         eastwood_api_key="a-production-api-key",
+        dnc_scrub_provider="ftc_registry",
+        dnc_san="test-san",
+        dnc_area_codes="313,248",
+        public_base_url="https://calls.example.com",
     ))
 
 

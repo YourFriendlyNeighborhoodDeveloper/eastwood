@@ -81,6 +81,10 @@ services:
       - prometheus
     ports:
       - "13000:3000"
+    volumes:
+      # Prometheus datasource + the "Eastwood operations" dashboard.
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
 
   eastwood-core:
     image: eastwood-core
@@ -121,6 +125,32 @@ services:
       DNC_TEST_ALLOWLIST: ${DNC_TEST_ALLOWLIST:-}
       TWILIO_SIGNATURE_VALIDATION_ENABLED: ${TWILIO_SIGNATURE_VALIDATION_ENABLED:-true}
       EASTWOOD_API_KEY: ${EASTWOOD_API_KEY:-}
+      # Outbound arm switch — false contacts nobody (see domain/outbound.py).
+      OUTBOUND_ENABLED: ${OUTBOUND_ENABLED:-false}
+      # Campaign scope, scoring and dialer limits. Before these were forwarded,
+      # setting them in .env had no effect on the container.
+      SCORE_WARM_THRESHOLD: ${SCORE_WARM_THRESHOLD:-50}
+      ACTIVE_STATES: ${ACTIVE_STATES:-MI}
+      MAX_CONCURRENT_CALLS: ${MAX_CONCURRENT_CALLS:-3}
+      DIAL_MAX_ATTEMPTS: ${DIAL_MAX_ATTEMPTS:-5}
+      # National DNC Registry (docs/go-live-checklist.md §2).
+      DNC_SCRUB_PROVIDER: ${DNC_SCRUB_PROVIDER:-local_csv}
+      DNC_SAN: ${DNC_SAN:-}
+      DNC_REGISTRY_USERNAME: ${DNC_REGISTRY_USERNAME:-}
+      DNC_REGISTRY_PASSWORD: ${DNC_REGISTRY_PASSWORD:-}
+      DNC_AREA_CODES: ${DNC_AREA_CODES:-}
+      DNC_REGISTRY_DOWNLOAD_URL: ${DNC_REGISTRY_DOWNLOAD_URL:-}
+      DNC_MAX_DATA_AGE_DAYS: ${DNC_MAX_DATA_AGE_DAYS:-31}
+      # Live-transfer alert destination and signed Facebook lead webhooks.
+      RYAN_PHONE_NUMBER: ${RYAN_PHONE_NUMBER:-}
+      FACEBOOK_APP_SECRET: ${FACEBOOK_APP_SECRET:-}
+      FACEBOOK_VERIFY_TOKEN: ${FACEBOOK_VERIFY_TOKEN:-}
+      CALENDLY_ENABLED: ${CALENDLY_ENABLED:-false}
+      CALENDLY_ACCESS_TOKEN: ${CALENDLY_ACCESS_TOKEN:-}
+    volumes:
+      # Downloaded DNC registry data must survive container rebuilds; the
+      # image itself never contains data/private (.dockerignore).
+      - dncdata:/app/data/private
 
 
   ai-agent:
@@ -198,3 +228,4 @@ services:
 
 volumes:
   pgdata:
+  dncdata:

@@ -42,3 +42,16 @@ agent_brief_sms_total = Counter(
     "Appointment handoff SMS attempts, by outcome",
     ["result"],
 )
+
+# 1 when prospect-facing outbound is permitted (armed AND authorized), else 0.
+outbound_permitted_gauge = Gauge(
+    "eastwood_outbound_permitted",
+    "1 when the outbound campaign is armed and authorized, 0 when halted or disarmed",
+)
+
+# channel: dial | sms | callback ; result: sent | queued | halted | blocked | deferred | skipped_no_provider
+outbound_contact_decisions_total = Counter(
+    "eastwood_outbound_contact_decisions_total",
+    "Prospect-facing contact attempts by channel and gate outcome",
+    ["channel", "result"],
+)

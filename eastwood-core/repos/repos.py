@@ -493,6 +493,20 @@ class FollowupRepo:
             .values(status="failed", attempt_count=FollowupTask.attempt_count + 1)
         )
 
+    async def mark_status(self, task_id: uuid.UUID, status: str) -> None:
+        """Close a task without sending: blocked | skipped (status column is 16 chars)."""
+        await self._s.execute(
+            update(FollowupTask).where(FollowupTask.id == task_id).values(status=status)
+        )
+
+    async def reschedule(self, task_id: uuid.UUID, fire_at: datetime) -> None:
+        """Push a pending task to a later fire time (e.g. the next TCPA window)."""
+        await self._s.execute(
+            update(FollowupTask)
+            .where(FollowupTask.id == task_id, FollowupTask.status == "pending")
+            .values(fire_at=fire_at)
+        )
+
     async def cancel_pending_for_lead(self, lead_id: uuid.UUID, sequence_type: str | None = None) -> None:
         """Cancel all pending tasks for a lead — e.g. when they convert."""
         q = update(FollowupTask).where(
@@ -526,6 +540,17 @@ class DialQueueRepo:
         self._s.add(entry)
         await self._s.flush()
         return entry
+
+    async def has_open_entry(self, lead_id: uuid.UUID) -> bool:
+        """True if the lead already has a pending or in-flight dial attempt."""
+        from sqlalchemy import func as sqlfunc
+        result = await self._s.execute(
+            select(sqlfunc.count(DialQueueEntry.id)).where(
+                DialQueueEntry.lead_id == lead_id,
+                DialQueueEntry.status.in_(("pending", "dialing")),
+            )
+        )
+        return (result.scalar_one() or 0) > 0
 
     async def get_due(self, now: datetime, limit: int = 10) -> list[DialQueueEntry]:
         result = await self._s.execute(

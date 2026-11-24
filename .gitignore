@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # ── Private lead data ─────────────────────────────────────────────────────────
 # Purchased lead lists contain consumer PII and must never be committed.
@@ -45,3 +46,4 @@ desktop.ini
 
 # Local AI-assistant working files
 .claude/
+.agents/

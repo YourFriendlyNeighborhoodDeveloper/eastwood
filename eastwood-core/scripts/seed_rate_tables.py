@@ -1,7 +1,9 @@
 """
-Carrier rate table seeder.
-Generates rows programmatically from calibrated base rates.
-Run once at startup (main.py checks if table is empty) or via:
+Carrier rate table SAMPLE seeder — synthetic data, not carrier rates.
+Generates rows programmatically from formula base rates under real carrier
+names, tagged source="synthetic_seed". RateTableAdapter never quotes those rows
+as carrier rates (they fall through to the labelled formula estimate), and
+eastwood-core no longer seeds them at boot. Useful only for schema/demo work:
   docker compose exec eastwood-core python -m scripts.seed_rate_tables
 """
 from __future__ import annotations
@@ -51,6 +53,7 @@ def _fe_rows() -> list[dict]:
                             "effective_date": _EFFECTIVE,
                             "expires_date": None,
                             "is_active": True,
+                            "source": "synthetic_seed",
                         })
     return rows
 
@@ -87,6 +90,7 @@ def _medicare_rows() -> list[dict]:
                 "effective_date": _EFFECTIVE,
                 "expires_date": None,
                 "is_active": True,
+                "source": "synthetic_seed",
             })
 
     # Medicare Supplement — age-rated
@@ -107,6 +111,7 @@ def _medicare_rows() -> list[dict]:
                 "effective_date": _EFFECTIVE,
                 "expires_date": None,
                 "is_active": True,
+                "source": "synthetic_seed",
             })
     return rows
 

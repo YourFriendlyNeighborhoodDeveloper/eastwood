@@ -21,9 +21,21 @@ from repos.repos import CallRepo, CarrierProfileRepo, ConsentRepo, DialQueueRepo
 # Retry offsets and dial eligibility live in domain.dialing so the Twilio status
 # callback and the dialer share one source of truth.
 from domain.dialing import RETRY_OFFSETS_HOURS as _RETRY_OFFSETS_HOURS, check_dial_eligibility
+from domain.outbound import outbound_permitted, record_contact_decision
 from sources.proactive import enrich_lead
 
 logger = logging.getLogger(__name__)
+
+# Lead status for a lead routed to auto-dial whose National DNC status is not
+# yet clear/exempt (e.g. no registry dataset covers it). Not dialable; re-score
+# the lead after a registry refresh to queue it.
+AWAITING_DNC_CLEARANCE = "awaiting_dnc_clearance"
+
+
+def mask_phone(phone: str | None) -> str:
+    """Last four digits only — phone numbers never reach the logs in full."""
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    return f"***{digits[-4:]}" if len(digits) >= 4 else "***"
 
 
 def _pick(q: dict, snake: str, camel: str, default=None):
@@ -66,6 +78,9 @@ class WorkersBrain:
         self._ai_agent = AiAgentClient()
         self._sms = SmsClient() if self._settings.twilio_account_sid else None
         self._dnc_scrub = get_scrub_provider(self._settings)
+        # Last outbound-gate reason logged by the dial loop, so a halted or
+        # disarmed campaign logs once per state change, not every 3 seconds.
+        self._last_outbound_reason: str | None = None
         # One outcome SMS to Ryan per connected call. Destination comes from
         # settings — never hardcoded into handlers.
         from domain.notifications import CallOutcomeNotificationService
@@ -133,7 +148,7 @@ class WorkersBrain:
 
             suppressed = await suppression_repo.is_suppressed(tenant_id, normalized["phone_e164"])
             if suppressed:
-                logger.info("lead suppressed: %s", normalized["phone_e164"])
+                logger.info("lead suppressed: %s", mask_phone(normalized["phone_e164"]))
                 return
 
             lead = await lead_repo.upsert_raw(tenant_id, normalized)
@@ -406,7 +421,7 @@ class WorkersBrain:
                 if claimed and claimed != phone:
                     logger.warning(
                         "dnc_request phone mismatch on lead %s: agent reported %s, suppressing %s",
-                        lead_id, claimed, phone,
+                        lead_id, mask_phone(claimed), mask_phone(phone),
                     )
 
                 if not await suppression_repo.is_suppressed(tenant_id, phone):
@@ -416,7 +431,7 @@ class WorkersBrain:
                         reason="dnc_request",
                         notes=f"requested on call, session={session_id}",
                     )
-                    logger.info("suppressed %s (lead %s) — DNC requested on call", phone, lead_id)
+                    logger.info("suppressed %s (lead %s) — DNC requested on call", mask_phone(phone), lead_id)
 
                 await lead_repo.update_status(lead_id, "suppressed")
                 await dq_repo.cancel_for_lead(lead_id)
@@ -428,7 +443,26 @@ class WorkersBrain:
                 if self._sms:
                     lead_repo = LeadRepo(session)
                     lead = await lead_repo.get_by_id(lead_id)
+                    send_ok, withheld_reason = False, ""
                     if lead:
+                        # Transactional, but still prospect-facing: a halted
+                        # campaign or a suppressed number gets nothing.
+                        permitted, why = await outbound_permitted(session, lead.tenant_id)
+                        if not permitted:
+                            withheld_reason = why
+                        elif await SuppressionRepo(session).is_suppressed(lead.tenant_id, lead.phone_e164):
+                            withheld_reason = "suppressed"
+                        else:
+                            send_ok = True
+                        if not send_ok:
+                            record_contact_decision(
+                                "sms", "blocked" if withheld_reason == "suppressed" else "halted"
+                            )
+                            logger.warning(
+                                "appointment confirmation SMS withheld for lead %s: %s",
+                                lead_id, withheld_reason,
+                            )
+                    if lead and send_ok:
                         msg_body = (
                             f"Hi {lead.first_name or 'there'}, your appointment with "
                             f"Eastwood Financial is confirmed! We'll call you at this number. "
@@ -642,6 +676,11 @@ class WorkersBrain:
                 logger.warning(
                     "refusing to queue lead %s: national_dnc_status=%s", lead.id, national_status
                 )
+                # Routing already wrote next_status="dialing"; a lead that was
+                # never queued must not claim to be dialing. A blocked lead was
+                # stopped (and its status set) before routing ever ran.
+                if national_status != BLOCKED:
+                    await lead_repo.update_status(lead.id, AWAITING_DNC_CLEARANCE)
                 return
 
             dq_repo = DialQueueRepo(session)
@@ -663,6 +702,17 @@ class WorkersBrain:
         calls_fired = 0
 
         async with session_scope() as session:
+            # Campaign gate first: disarmed, never authorized, or halted means
+            # nothing is dialed. Queue entries stay pending, untouched, until
+            # an operator authorizes (or re-authorizes) the campaign.
+            permitted, why = await outbound_permitted(session)
+            if why != self._last_outbound_reason:
+                log = logger.info if permitted else logger.warning
+                log("dialer outbound gate: %s", why)
+                self._last_outbound_reason = why
+            if not permitted:
+                return 0
+
             dq_repo = DialQueueRepo(session)
             lead_repo = LeadRepo(session)
 
@@ -700,6 +750,7 @@ class WorkersBrain:
 
                 # Mark dialing with a placeholder; session_id filled in after session creation
                 await dq_repo.mark_dialing(entry.id, session_id=f"pending_{entry.id}")
+                record_contact_decision("dial", "sent")
                 calls_fired += 1
                 # Fire in background so the session lock doesn't block the loop
                 asyncio.create_task(
@@ -875,7 +926,7 @@ class WorkersBrain:
                 )
                 logger.info(
                     "outbound call queued lead=%s session=%s to=%s",
-                    lead.id, session_id, lead.phone_e164,
+                    lead.id, session_id, mask_phone(lead.phone_e164),
                 )
             else:
                 logger.info(
@@ -939,15 +990,21 @@ class WorkersBrain:
         )
 
     async def _send_consent_sms(self, lead: Any) -> None:
-        if not self._sms:
-            logger.info("SMS client not configured, skipping consent SMS")
-            return
-        try:
-            body = (
-                f"Hi {lead.first_name or 'there'}, you recently requested insurance information. "
-                "Reply YES to receive a call about your options. "
-                "Reply STOP to opt out. Msg&Data rates may apply."
+        """Queue the consent request as a follow-up SMS task — never sent inline.
+
+        The follow-up worker applies every outbound gate at send time (campaign
+        authorization, suppression, National DNC clearance, terminal lead
+        status, the TCPA calling window), so a consent request can never reach
+        a number the dialer itself would refuse, and a halted campaign holds it.
+        """
+        tenant_id = getattr(lead, "tenant_id", None) or self._settings.default_tenant_id
+        async with session_scope() as session:
+            await FollowupRepo(session).create(
+                lead_id=lead.id,
+                tenant_id=tenant_id,
+                sequence_type="consent_request",
+                fire_at=datetime.now(timezone.utc),
+                context_data={"_channel": "sms", "_template": "consent_request"},
             )
-            await asyncio.to_thread(self._sms.send, lead.phone_e164, body)
-        except Exception as exc:
-            logger.exception("failed to send consent SMS to %s: %s", lead.phone_e164, exc)
+        record_contact_decision("sms", "queued")
+        logger.info("consent request queued for lead %s", lead.id)

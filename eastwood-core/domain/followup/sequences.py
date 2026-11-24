@@ -23,6 +23,12 @@ class SequenceStep:
 # ── SMS message templates ─────────────────────────────────────────────────────
 
 SMS_TEMPLATES: dict[str, str] = {
+    # consent request (queued by routing for leads without express written consent)
+    "consent_request": (
+        "Hi {first_name}, you recently requested insurance information. "
+        "Reply YES to receive a call about your options. "
+        "Reply STOP to opt out. Msg&Data rates may apply."
+    ),
     # missed_call
     "missed_call_immediate": (
         "Hi {first_name}, this is {agent_name} from Eastwood Insurance — "

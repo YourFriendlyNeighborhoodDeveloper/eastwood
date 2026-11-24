@@ -22,6 +22,16 @@ structlog.configure(
     ]
 )
 
+# Application loggers propagate to root. Without a root handler, Python's
+# last-resort handler prints WARNING+ only, so every operational INFO line
+# (dial fired, follow-up sent/skipped, brief skipped) was silently dropped.
+import os as _os_logging
+
+logging.basicConfig(
+    level=_os_logging.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,6 +83,7 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendly_cancel_url TEXT",
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendly_reschedule_url TEXT",
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendly_status VARCHAR(32) NOT NULL DEFAULT 'not_requested'",
+            "ALTER TABLE carrier_rate_tables ADD COLUMN IF NOT EXISTS source VARCHAR(128)",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS ai_summary TEXT",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS health_flags JSONB",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS carrier_placed VARCHAR(128)",
@@ -141,22 +152,37 @@ async def lifespan(app: FastAPI):
                         )
                 logger.info("seeded %d carrier profiles (version=%s)", len(_cp_data["profiles"]), _version)
 
-    # Carrier rate table — truncate if RESET_RATE_TABLE_ON_BOOT=true, otherwise seed if empty
-    import os as _os
-    from db.models import CarrierRateTable as _CRTModel
-    if _os.environ.get("RESET_RATE_TABLE_ON_BOOT", "false").lower() == "true":
+    # Carrier rate table — truncate if RESET_RATE_TABLE_ON_BOOT=true. Read
+    # through Settings (not os.environ) so the production boot guard, which
+    # refuses this flag, sees exactly the value acted on here.
+    if settings.reset_rate_table_on_boot:
         async with _get_engine().begin() as _rtw:
             await _rtw.execute(text("TRUNCATE carrier_rate_tables"))
         logger.warning("RESET_RATE_TABLE_ON_BOOT: carrier_rate_tables truncated — formula adapter will be used for all quotes")
-    else:
-        async with _get_engine().connect() as _rt_conn:
-            _rt_existing = await _rt_conn.execute(_select(_CRTModel).limit(1))
-            if _rt_existing.first() is None:
-                from scripts.seed_rate_tables import _all_seed_rows
-                _rt_rows = _all_seed_rows()
-                async with _get_engine().begin() as _rtw:
-                    await _rtw.execute(_CRTModel.__table__.insert(), _rt_rows)
-                logger.info("seeded %d carrier rate table rows", len(_rt_rows))
+    # No automatic seeding. scripts/seed_rate_tables.py generates formula output
+    # under real carrier names; seeding it at boot used to turn every quote into
+    # a "carrier" quote naming a carrier. Carrier-rate mode (go-live checklist
+    # §4 Mode B) requires loading validated rate sheets with a `source`.
+    async with _get_engine().connect() as _rt_conn:
+        _rt_carrier_rows = (await _rt_conn.execute(text(
+            "SELECT count(*) FROM carrier_rate_tables "
+            "WHERE is_active AND source IS NOT NULL AND source <> 'synthetic_seed'"
+        ))).scalar_one()
+    logger.warning(
+        "QUOTE MODE: %s (%d active carrier rate rows with provenance)",
+        "carrier-rate (Mode B)" if _rt_carrier_rows else "estimate-and-book (Mode A, formula estimates)",
+        _rt_carrier_rows,
+    )
+
+    # Announce the outbound campaign state once at boot, loudly.
+    from db.session import session_scope as _ss
+    from domain.outbound import get_outbound_state
+    async with _ss() as _os_session:
+        _ob = await get_outbound_state(_os_session)
+    logger.warning(
+        "OUTBOUND CAMPAIGN STATE: permitted=%s reason=%s (OUTBOUND_ENABLED=%s)",
+        _ob.permitted, _ob.reason, settings.outbound_enabled,
+    )
 
     from kafka_io.kafka_client import get_producer
     await get_producer()

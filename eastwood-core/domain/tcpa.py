@@ -37,6 +37,11 @@ _STATE_TZ: dict[str, str] = {
     "DC": "America/New_York",
 }
 
+def supported_states() -> frozenset[str]:
+    """USPS codes whose calling window this module can enforce (50 states + DC)."""
+    return frozenset(_STATE_TZ)
+
+
 _TCPA_START_HOUR = 8   # 8:00 AM local
 _TCPA_END_HOUR   = 21  # 9:00 PM local
 

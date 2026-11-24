@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from pydantic import field_validator
+from urllib.parse import urlparse
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -139,6 +141,19 @@ class Settings(BaseSettings):
     quote_min_face_dollars: int = 5_000
     quote_max_face_dollars: int = 50_000
 
+    # ── Outbound campaign arm switch ─────────────────────────────────────────
+    # The deployment-level half of a two-key launch. False (the default) means
+    # nothing prospect-facing ever leaves the system — no dial, no follow-up
+    # SMS or callback, no consent request — whatever else is configured. True
+    # only *permits* outbound: an operator must still authorize the campaign at
+    # runtime (POST /api/outbound/resume), and can halt it at any moment
+    # (POST /api/outbound/halt). See domain.outbound.
+    outbound_enabled: bool = False
+
+    # Truncates carrier_rate_tables on every boot so quotes fall back to the
+    # formula adapter. Destructive: production refuses to boot with it set.
+    reset_rate_table_on_boot: bool = False
+
     # Autonomous dialer controls
     max_concurrent_calls: int = 3        # hard cap on simultaneous outbound calls
     dial_max_attempts: int = 5           # total attempts per lead before giving up
@@ -189,6 +204,35 @@ class Settings(BaseSettings):
         if not 0 <= v <= 100:
             raise ValueError("threshold must be 0-100")
         return v
+
+    @field_validator("active_states")
+    @classmethod
+    def active_states_are_known(cls, v: str) -> str:
+        """Every campaign state must be one the TCPA calling-window table knows.
+
+        An unknown code (a typo such as "MIC", or a territory) would otherwise
+        silently cost every lead its state-fit points, and a state with no
+        timezone entry cannot have its calling window enforced correctly.
+        """
+        from domain.tcpa import supported_states
+
+        codes = [s.strip().upper() for s in v.split(",") if s.strip()]
+        unknown = sorted(set(codes) - supported_states())
+        if unknown:
+            raise ValueError(
+                f"ACTIVE_STATES contains unsupported state codes: {', '.join(unknown)}. "
+                "Use two-letter USPS codes for the 50 states and DC."
+            )
+        return v
+
+    @model_validator(mode="after")
+    def warm_not_above_hot(self) -> "Settings":
+        if self.score_warm_threshold > self.score_hot_threshold:
+            raise ValueError(
+                "SCORE_WARM_THRESHOLD must not exceed SCORE_HOT_THRESHOLD "
+                f"({self.score_warm_threshold} > {self.score_hot_threshold})"
+            )
+        return self
 
 
 _settings: Settings | None = None
@@ -241,3 +285,101 @@ def assert_production_safety(settings: Settings | None = None) -> None:
             "would break quoting and booking mid-campaign. Set EASTWOOD_API_KEY "
             "in the environment (and give the same value to ai-agent)."
         )
+    if not is_production(s):
+        return
+
+    if s.reset_rate_table_on_boot:
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with RESET_RATE_TABLE_ON_BOOT=true. "
+            "It truncates carrier_rate_tables on every boot, silently discarding any "
+            "loaded carrier rates. Set RESET_RATE_TABLE_ON_BOOT=false."
+        )
+
+    # National DNC: production clears numbers only against the official dataset.
+    if s.dnc_scrub_provider.strip().lower() != "ftc_registry":
+        raise UnsafeProductionConfigError(
+            f"Refusing to start: APP_ENV=production with DNC_SCRUB_PROVIDER="
+            f"{s.dnc_scrub_provider!r}. Production requires the official FTC "
+            "registry provider (DNC_SCRUB_PROVIDER=ftc_registry)."
+        )
+    if not s.dnc_san.strip() or not s.dnc_area_codes.strip():
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with the FTC registry provider "
+            "but without DNC_SAN and DNC_AREA_CODES. Without a subscription and "
+            "its area-code scope no number can ever be cleared."
+        )
+
+    # Webhooks: Twilio signs the exact public URL, so it must be stable HTTPS.
+    problem = public_base_url_problem(s.public_base_url)
+    if problem:
+        raise UnsafeProductionConfigError(
+            f"Refusing to start: APP_ENV=production with an unusable PUBLIC_BASE_URL "
+            f"({problem}). Twilio TwiML, status and media callbacks are built from it "
+            "and signature validation reconstructs it, so it must be a stable HTTPS URL."
+        )
+
+    # Scoring: the documented launch thresholds are a floor in production.
+    if (
+        s.score_hot_threshold < PRODUCTION_MIN_HOT_THRESHOLD
+        or s.score_warm_threshold < PRODUCTION_MIN_WARM_THRESHOLD
+    ):
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with scoring thresholds below "
+            f"the documented launch values (hot>={PRODUCTION_MIN_HOT_THRESHOLD}, "
+            f"warm>={PRODUCTION_MIN_WARM_THRESHOLD}); got hot={s.score_hot_threshold}, "
+            f"warm={s.score_warm_threshold}. Test thresholds route nearly every lead "
+            "to auto-dial."
+        )
+
+    if not s.active_states_list():
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with ACTIVE_STATES empty. "
+            "Name every campaign state explicitly."
+        )
+
+    if s.max_concurrent_calls < 1:
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with MAX_CONCURRENT_CALLS < 1."
+        )
+
+
+# The scoring thresholds documented for launch (docs/go-live-checklist.md §3).
+PRODUCTION_MIN_HOT_THRESHOLD = 75
+PRODUCTION_MIN_WARM_THRESHOLD = 50
+
+# Hosts that are temporary by design: they rotate, and every Twilio webhook
+# 404s (or fails signature validation) the moment they do.
+_TEMPORARY_TUNNEL_SUFFIXES = (
+    ".ngrok.io",
+    ".ngrok-free.app",
+    ".ngrok.app",
+    ".ngrok-free.dev",
+    ".ngrok.dev",
+    ".trycloudflare.com",
+    ".loca.lt",
+    ".localtunnel.me",
+    ".serveo.net",
+)
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"}
+
+
+def is_production(settings: Settings) -> bool:
+    return settings.app_env.strip().lower() == "production"
+
+
+def public_base_url_problem(url: str) -> str | None:
+    """Why this PUBLIC_BASE_URL cannot carry production webhooks, or None if it can."""
+    url = (url or "").strip()
+    if not url:
+        return "it is empty"
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        return "it is not https"
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return "it has no host"
+    if host in _LOCAL_HOSTS:
+        return f"{host} is a local address"
+    if any(host == s.lstrip(".") or host.endswith(s) for s in _TEMPORARY_TUNNEL_SUFFIXES):
+        return f"{host} is a temporary tunnel host"
+    return None

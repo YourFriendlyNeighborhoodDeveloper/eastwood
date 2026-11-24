@@ -326,6 +326,7 @@ async def test_unknown_from_ftc_provider_never_reaches_the_dial_queue(tmp_path, 
         def __init__(self, s): pass
         async def get_by_id(self, _id): return _Lead()
         async def set_national_dnc(self, lead_id, status, **kw): dnc_writes.append(status)
+        async def update_status(self, lead_id, status): pass
 
     class _DQRepo:
         def __init__(self, s): pass
