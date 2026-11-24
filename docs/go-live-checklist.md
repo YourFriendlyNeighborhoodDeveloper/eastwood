@@ -5,14 +5,49 @@ controlled live campaign**. Work top to bottom. The system is GO only when every
 required box is checked (§10).
 
 Conventions:
-- Environment variables live in the repo-root `.env` (loaded by `docker-compose`
-  and by `eastwood-core` via pydantic-settings). `.env` is gitignored; start from
-  `.env.example`.
+- **Development** variables live in the repo-root `.env` (start from
+  `.env.example`). **Production** uses a separate `.env.production` (start from
+  `.env.production.example`) with the production overlay:
+  `docker compose -p eastwood-prod --env-file .env.production -f docker-compose.yml -f docker-compose.production.yml up -d --build`.
+  Both env files are gitignored; keep them `chmod 600`.
 - Schema is applied automatically when `eastwood-core` boots (idempotent
   `create_all` + `ALTER` in `app/main.py`); the SQL under `migrations/postgres/`
   is the record, not a manual step.
 - Prometheus scrapes `eastwood-core:/metrics` and `ai-agent:/metrics`; Grafana is
-  in `docker-compose.yml`.
+  provisioned with a Prometheus datasource and the **Eastwood operations**
+  dashboard (`grafana/`).
+- Costs and third-party prerequisites: [`launch-dependencies-and-costs.md`](launch-dependencies-and-costs.md).
+
+## Verification record — 2026-11-24
+
+Everything below was run against an isolated stack: separate compose project
+and database, no Twilio account SID (no call/SMS client can exist), Twilio and
+OpenAI hostnames pinned to loopback, synthetic leads on fictional 555-01xx
+numbers, Twilio webhooks simulated with signed requests. No real person was
+contacted. A box is checked only when the result fully satisfies it; results
+from simulation are noted inline, and live-provider steps stay open.
+
+| Area | Result |
+| --- | --- |
+| All 9 services | up; core + agent `/health` 200; Postgres (both DBs), Redis `PONG`, Kafka 17 topics + both consumer groups, Prometheus 2/2 targets up, Grafana datasource + dashboard |
+| Tests | eastwood-core **273 passed**, ai-agent **265 passed**, TypeScript clean |
+| Lead pipeline | API ingest (401/403/422 enforced) → E.164 normalization → DNC scrub → triage → scoring → routing |
+| Consent | no express written consent → never queued; consent request queued as a gated task, never sent inline |
+| DNC | `unknown` never queued (status `awaiting_dnc_clearance`); follow-up to an unscrubbed number blocked |
+| Campaign gate | armed-but-never-authorized holds dial queue and follow-ups; resume → dials; halt → nothing fires; state persists across restarts |
+| Webhook smoke (simulated Twilio, via nginx) | signed TwiML 200 with media URL; unsigned 403; spoofed origin 403; media WebSocket 101; internal agent endpoints 404 at edge; no-answer → slot released + retry at +4.0 h; duplicate callback idempotent; completed → terminal; agent sessions return to 0 |
+| Agent call (simulated events) | field capture audit row; quote presented + persisted; booking + handoff profile; `call_ended` → outcome follow-ups carrying the quote |
+| Quotes | C/B/A, `estimated` / `formula_adapter`, `bindable=false`; carrier `null` to the model on estimates |
+| Opt-out | mid-call DNC suppresses the dialed number (not the misheard one) and cancels retries; SMS STOP suppresses and cancels everything; STOP before import pre-suppresses; re-import queues nothing |
+| Recovery | core restart (state intact); Kafka outage (ingest fails loudly, core stays up, consumer resumes); stuck `dialing` slot reaped; ai-agent restart |
+| Production fail-closed | real image refuses to boot for each of: TCPA bypass, DNC allowlist, no API key, `local_csv`, ngrok URL, 5/5 thresholds, rate-table reset, invalid state; a valid production config boots **disarmed**; the production overlay refuses to start without external credentials |
+
+Defects found and fixed in that run (commit `bdcbebb`): follow-ups and
+consent SMS bypassed every compliance gate; texted STOP never suppressed
+calls; synthetic seed rates were quoted as named carrier rates; Prometheus
+scraped a non-existent target; compose never forwarded DNC/state/threshold
+settings to the container; app INFO logs were dropped; a DNC-refused lead
+reported `dialing`.
 
 ---
 
@@ -24,9 +59,17 @@ Conventions:
 - [ ] Update local `.env` with the new `OPENAI_API_KEY` and `TWILIO_AUTH_TOKEN`
       (and the `EASTWOOD_TWILIO_*` mirrors).
 - [ ] Verify the **old keys are disabled** (an API call with the old key must fail).
-- [ ] Confirm **no secrets appear in currently tracked files**:
+      **Audit 2026-11-24:** a hash comparison (no values printed) shows the
+      `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `EASTWOOD_TWILIO_AUTH_TOKEN` and
+      `OPENAI_API_KEY` in the local `.env` are **identical to the values in the
+      pre-scrub history** — none has been rotated.
+- [x] Confirm **no secrets appear in currently tracked files**:
       `git grep -nE 'sk-(proj-)?[A-Za-z0-9]|AC[0-9a-f]{32}' -- . ':!.env.example'`
-      should return nothing.
+      should return nothing. *Verified 2026-11-24: 0 matches in tracked files and
+      in all reachable commits; `origin/main` equals the scrubbed local history;
+      both built images contain no `.env`, lead CSV or `data/private` files.*
+- [x] Local `.env` permissions tightened to `600` (was world-readable `644`);
+      `.env.production` created `600` with generated internal secrets only.
 - [x] **Git history scrubbed (2026-07-16).** `git filter-repo` removed the old
       `.env` (live Twilio token + OpenAI key), the committed lead-export CSV
       (real PII), and `ai-agent/node_modules` from every commit, and replaced
@@ -56,7 +99,17 @@ Conventions:
 The dialer will **not** call a lead unless `national_dnc_status` is `clear` or
 `exempt`. New leads default to `unknown`, which is not dialable. With the default
 `local_csv` provider nothing ever resolves to `clear`, so **you must configure the
-official provider before any real dial.**
+official provider before any real dial.** Production now refuses to boot
+without `DNC_SCRUB_PROVIDER=ftc_registry`, `DNC_SAN` and `DNC_AREA_CODES`, and
+`docker-compose.yml` now forwards the `DNC_*` settings (previously they never
+reached the container) and keeps the dataset in the `dncdata` volume.
+
+The subscription is priced **per phone area code** (first five free), and a
+lead's area code often differs from its state. A number whose area code is not
+subscribed stays `unknown` and is never dialed, so the subscribed area codes
+also define the campaign's reach. Leads scored before the first successful
+refresh sit at `awaiting_dnc_clearance`; re-ingest them after the refresh to
+re-scrub and queue them.
 
 - [ ] Obtain / verify the **FTC registry account and SAN** (Subscription Account
       Number).
@@ -97,32 +150,46 @@ official provider before any real dial.**
 
 ## 3. TCPA and dialing configuration
 
-- [ ] `APP_ENV=production`
-- [ ] `BYPASS_TCPA=false`
+The production overlay (`docker-compose.production.yml`) pins the first five
+items regardless of what `.env.production` says, and the boot guard refuses each
+unsafe value (verified in the real image, 2026-11-24).
+
+- [x] `APP_ENV=production` *(pinned by the production overlay)*
+- [x] `BYPASS_TCPA=false` *(pinned)*
       — With `APP_ENV=production` **and** `BYPASS_TCPA=true`, `eastwood-core`
       refuses to boot (compliance guard). A clean boot confirms this is off.
-- [ ] `DNC_TEST_ALLOWLIST` empty
+- [x] `DNC_TEST_ALLOWLIST` empty *(pinned)*
       — The dev test allowlist scrubs self-owned numbers as `exempt` without a
       provider. In production it must be empty; `eastwood-core` refuses to boot
       with `APP_ENV=production` and a non-empty allowlist (same compliance guard).
-- [ ] `SCORE_HOT_THRESHOLD=75`
-- [ ] `SCORE_WARM_THRESHOLD=50`
+- [x] `SCORE_HOT_THRESHOLD=75` *(template default; production refuses lower)*
+- [x] `SCORE_WARM_THRESHOLD=50` *(template default; production refuses lower)*
 - [ ] **Verify state timezone calling windows** — dialing is gated to 8am–9pm local
       time per the lead's state (`domain/tcpa.py`). Spot-check a lead in each
-      campaign state.
-- [ ] **Verify entity-specific suppression checks** — a prior "stop calling"
+      campaign state. *MI verified 2026-11-24; follow-ups now defer to the next
+      window too. The code enforces the federal 8am–9pm window only — check each
+      campaign state for a stricter state-law window before adding it.*
+- [x] **Verify entity-specific suppression checks** — a prior "stop calling"
       request (the `suppressions` table) blocks both dialing and re-import.
-- [ ] **Verify national DNC checks** — see §2; `unknown`/`blocked` never dial.
-- [ ] **Verify callable phone normalization** — every lead has a valid E.164
-      `phone_e164`; rows without one were dropped at ingest.
-- [ ] **Verify max concurrency and retry limits**:
+      *Verified: mid-call DNC, texted STOP (`/twilio/sms`), STOP before import,
+      re-import, and follow-ups to suppressed numbers.*
+- [x] **Verify national DNC checks** — see §2; `unknown`/`blocked` never dial.
+      *Verified: `unknown` never queued; follow-ups to unscrubbed numbers blocked.*
+- [x] **Verify callable phone normalization** — every lead has a valid E.164
+      `phone_e164`; rows without one were dropped at ingest. *Verified (invalid
+      number → 422).*
+- [x] **Verify max concurrency and retry limits** *(verified 2026-11-24:
+      `MAX_CONCURRENT_CALLS=1` fired exactly one call; no-answer rescheduled at
+      +4.0 h; duplicate callback did not reschedule; stuck slot reaped; full
+      ladder and max attempts covered by `tests/test_retry_ladder.py`)*:
   - `MAX_CONCURRENT_CALLS` (hard cap on simultaneous calls)
   - `DIAL_MAX_ATTEMPTS` (attempts per lead)
   - retry ladder `_RETRY_OFFSETS_HOURS = [4, 24, 32, 56, 80]` (`domain/dialing`)
 - [ ] **Verify `ACTIVE_STATES` includes every campaign state.** Auto-dial routing
       depends on scoring; a lead outside `ACTIVE_STATES` loses its state-fit points
       and may route to `nurture` instead of `auto_dial`. This is the most common
-      reason "nothing dials" after import.
+      reason "nothing dials" after import. *Unknown codes are now refused at
+      startup; production refuses an empty list. Choosing the states is yours.*
 - [ ] **Run a dry-run eligibility report before enabling Twilio.** Import the list
       with `PUBLIC_BASE_URL` unset (sessions are created but no call is placed), or
       query `dial_queue`/`leads` directly, and confirm the leads you expect to dial
@@ -137,22 +204,30 @@ official provider before any real dial.**
 Choose and document **exactly one** launch mode. Ambiguous mixed mode is not
 permitted.
 
+> **Fixed 2026-11-24:** with `RESET_RATE_TABLE_ON_BOOT=false`, boot used to seed
+> formula-generated "sample" rates under real carrier names, so every quote was
+> labelled a carrier rate and named a carrier. Nothing is seeded at boot now,
+> and only rows with a real `source` are quoted as carrier rates. Boot logs the
+> active mode: `QUOTE MODE: estimate-and-book …` or `carrier-rate (Mode B)`.
+
 ### Mode A — estimate-and-book (recommended for first launch)
-- [ ] `RESET_RATE_TABLE_ON_BOOT=false` (does not truncate rate tables on boot, but
-      with no rate rows loaded the formula adapter is still used)
-- [ ] `FormulaAdapter` output remains labeled `quote_type=estimated`
-- [ ] `carrier_rate=false`
-- [ ] `bindable=false`
-- [ ] Carrier name stays **hidden from the prospect** (the tool returns `carrier:
-      null` for estimates)
+- [x] `RESET_RATE_TABLE_ON_BOOT=false` *(pinned; with no provenance rows the
+      formula adapter is used)*
+- [x] `FormulaAdapter` output remains labeled `quote_type=estimated` *(verified)*
+- [x] `carrier_rate=false` *(verified)*
+- [x] `bindable=false` *(verified)*
+- [x] Carrier name stays **hidden from the prospect** (the tool returns `carrier:
+      null` for estimates) *(`toolHandlers.ts`; ai-agent quote tests)*
 - [ ] Imogen uses the approved estimate language: *"Based on what you told me, we
       may be looking around $X per month. I'd like to book a licensed review to
       confirm the exact carrier and final rate."*
 
 ### Mode B — carrier-rate mode
 - [ ] Load validated carrier rate tables (`carrier_rate_tables`) with
-      `RESET_RATE_TABLE_ON_BOOT=false`
-- [ ] Verify each row's `source` / `version` / `effective_date`
+      `RESET_RATE_TABLE_ON_BOOT=false`. Every row needs a `source` naming the
+      rate sheet (rows with no source, or `synthetic_seed`, are ignored). There
+      is no import tool yet; loading is a manual, reviewed step.
+- [ ] Verify each row's `source` / `effective_date` (there is no `version` column)
 - [ ] Confirm quote labels show `rate_source=rate_table` (or `cms_api`) and
       `carrier_rate=true`
 - [ ] `bindable` remains `false` (Eastwood submits no application; nothing binds)
@@ -215,23 +290,39 @@ Verified against live Docker stack:
       Twilio TwiML, status, and media-stream callbacks are built from this; when it
       rotates, every webhook 404s mid-campaign. Signature validation reconstructs
       the signed URL from it, so it must be exactly what Twilio is given.
-- [ ] Set **`EASTWOOD_API_KEY`** to a long random secret (`openssl rand -hex 32`)
+      *Production now refuses to boot with an empty, non-HTTPS, local, or
+      temporary-tunnel URL (ngrok, trycloudflare, localtunnel). The overlay binds
+      nginx to `127.0.0.1:18000`; put a TLS proxy or a named tunnel in front.*
+- [x] Set **`EASTWOOD_API_KEY`** to a long random secret (`openssl rand -hex 32`)
       — one value shared by `eastwood-core` and `ai-agent` (compose passes it to
-      both). Production refuses to boot without it.
-- [ ] Keep **`TWILIO_SIGNATURE_VALIDATION_ENABLED=true`** (the default).
-      Production refuses to boot with it off.
+      both). Production refuses to boot without it. *Generated into the local
+      `.env.production` (2026-11-24).*
+- [x] Keep **`TWILIO_SIGNATURE_VALIDATION_ENABLED=true`** (the default).
+      Production refuses to boot with it off. *Pinned by the production overlay.*
+- [ ] Point the Twilio number's **"A message comes in"** webhook at
+      `POST {PUBLIC_BASE_URL}/twilio/sms`. Without it a texted STOP only stops
+      texts (Twilio's own opt-out) and the prospect stays dialable; with it the
+      number is suppressed for calls and texts and everything pending is
+      cancelled. *Endpoint verified with simulated signed requests.*
 - [ ] Verify the Twilio **voice / status / media** routes resolve:
   - `POST|GET {PUBLIC_BASE_URL}/twiml/call/{session_id}` (TwiML)
   - `POST {PUBLIC_BASE_URL}/twilio/status/{session_id}` (terminal status → retry +
     session close + slot release)
   - `wss://…/agent/sessions/{session_id}/media` (media stream via nginx `/agent/`)
+
+  *All three verified through nginx with simulated, signed Twilio requests
+  (2026-11-24); re-verify against the real `PUBLIC_BASE_URL`.*
 - [ ] Verify **TLS** on `PUBLIC_BASE_URL` (valid cert, HTTPS only).
-- [ ] Verify service health on the **internal** network (`GET /health` on both
+- [x] Verify service health on the **internal** network (`GET /health` on both
       services via their compose ports) — nginx intentionally does not proxy
-      health or metrics to the public edge.
+      health or metrics to the public edge. *Verified: both 200 internally; at
+      the edge `/health` and `/metrics` reach only the static site, and
+      `/agent/health`, `/agent/metrics`, `/agent/sessions/*` return 404.*
 - [ ] Run a **full webhook smoke test**: place one call to your own phone, answer,
       let it complete, and confirm the status callback fired (slot released,
-      session closed) — with signature validation enabled throughout.
+      session closed) — with signature validation enabled throughout. *The
+      simulated version passed end to end; the live call needs rotated Twilio
+      credentials and the stable URL.*
 
 ---
 
@@ -254,13 +345,28 @@ Verified against live Docker stack:
   - [ ] open questions
 - [ ] Confirm the **full handoff profile is persisted** in `handoff_profiles`
       (the canonical record; the SMS is only the alert).
-- [ ] Confirm that with `AGENT_NOTIFICATION_PHONE_E164` **unset**, a booking still
+- [x] Confirm that with `AGENT_NOTIFICATION_PHONE_E164` **unset**, a booking still
       succeeds (the brief is skipped with a warning, profile still persisted) — do
-      not launch with it unset, but know the failure mode is soft.
+      not launch with it unset, but know the failure mode is soft. *Verified
+      2026-11-24 (booking 201, `handoff_profiles` row, warning logged; same soft
+      path for the call-outcome SMS). The production overlay now requires the
+      variable, so production cannot start with it unset.*
 
 ---
 
 ## 7. Controlled test campaign
+
+Outbound is a two-key launch. Nothing prospect-facing — dial, follow-up SMS or
+callback, consent request, booking confirmation — leaves the system until both:
+
+1. `OUTBOUND_ENABLED=true` in `.env.production` (deployment key; default `false`), and
+2. an operator authorizes the campaign (runtime key, recorded with name and reason):
+   `curl -X POST {core}/api/outbound/resume -H "Authorization: Bearer $EASTWOOD_API_KEY" -H 'Content-Type: application/json' -d '{"operator":"…","reason":"…"}'`
+
+**Emergency stop:** `POST /api/outbound/halt` with the same body. The dialer stops
+within 3 s and the follow-up worker within 30 s; connected calls finish
+normally. `GET /api/outbound/status` shows the state. A fresh deployment has
+never been authorized and starts halted; a halt survives restarts.
 
 - [ ] Use a **tiny, operator-approved list** first — **5 to 10 numbers**,
       preferably numbers you control or have explicit consent to call.
@@ -270,7 +376,10 @@ Verified against live Docker stack:
 - [ ] Conservative retry settings (leave the default ladder; consider lowering
       `DIAL_MAX_ATTEMPTS` for the first run).
 - [ ] **Monitor every call live.**
-- [ ] Confirm, for the run:
+- [ ] Practise the **emergency halt** once before the first dial and confirm
+      `eastwood_outbound_permitted` drops to 0.
+- [ ] Confirm, for the run *(each item below passed in the 2026-11-24 simulation;
+      confirm again on the live run)*:
   - [ ] **slot release** — `dial_queue` rows leave `dialing` immediately on
         terminal status
   - [ ] **session cleanup** — `agent_sessions_active` returns to 0
@@ -307,8 +416,13 @@ Track:
 - duplicate terminal events — `agent_duplicate_terminal_events_total`
 - SMS notification failures — logs (`domain.notifications`); no metric yet
 - tool usage / vetoes — `agent_tool_invocations_total`, `agent_policy_decisions_total`
+- campaign gate — `eastwood_outbound_permitted` (1 = authorized, 0 = halted/disarmed)
+- gated contact decisions — `eastwood_outbound_contact_decisions_total{channel,result}`
+  (`sent`, `queued`, `blocked`, `deferred`, `skipped_no_provider`)
 
-**Immediate stop conditions** (halt the campaign):
+Grafana → **Eastwood → Eastwood operations** charts these.
+
+**Immediate stop conditions** — halt with `POST /api/outbound/halt`:
 - any DNC request followed by further dialing or SMS to that number
 - an `unknown` or `blocked` lead reaches Twilio
 - a duplicate appointment notification
@@ -345,26 +459,38 @@ The system is **GO only when every required item above is checked.**
 ### Current known blockers
 
 These must be resolved before the first live dial. None is application code — all
-are configuration, credentials, or data:
+are configuration, credentials, data, or third-party registration (updated
+2026-11-24; costs in [`launch-dependencies-and-costs.md`](launch-dependencies-and-costs.md)):
 
 - [ ] **Real FTC registry credentials and a verified download endpoint** — the
       provider is built and tested, but `local_csv` dials nobody and no real
       `DNC_REGISTRY_DOWNLOAD_URL` / SAN is configured yet (§2).
 - [ ] **A fresh, complete, in-scope DNC dataset** — `scripts/refresh_dnc.py` has
       not been run against the real registry; no lead is currently `clear` (§2).
-- [ ] **Rotated Twilio and OpenAI credentials** — prior keys are still valid and
-      remain in git history (§1).
+- [ ] **Rotated Twilio and OpenAI credentials** — confirmed 2026-11-24 that the
+      configured values are the ones exposed before the history scrub; they
+      still exist in the two pre-scrub bundles (§1).
 - [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel (§5).
-      Webhook signature validation and API authentication are implemented and
-      verified (commit `6f2cff8`); the URL itself is the remaining gap.
+      Production now refuses to boot with a tunnel URL.
+- [ ] **A2P 10DLC registration** for the Twilio number (brand + campaign).
+      Eastwood sends SMS (follow-ups, consent requests, agent briefs); carriers
+      block unregistered 10DLC traffic.
+- [ ] **Twilio inbound SMS webhook** → `{PUBLIC_BASE_URL}/twilio/sms` (§5).
 - [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
       the formula adapter; carrier rate tables are not loaded (§4).
-- [ ] **Production-safe environment values** — confirm `APP_ENV=production`,
-      `BYPASS_TCPA=false`, `DNC_TEST_ALLOWLIST` empty, thresholds `75`/`50`,
-      `RESET_RATE_TABLE_ON_BOOT=false`, `ACTIVE_STATES` covering the campaign
-      (§3), `EASTWOOD_API_KEY` set, and `TWILIO_SIGNATURE_VALIDATION_ENABLED=true`
-      (§5 — the boot guard enforces the last two). `DNC_TEST_ALLOWLIST` scrubs listed numbers as exempt without a
-      provider — a testing affordance only; `eastwood-core` refuses to boot in
-      production if it is non-empty.
+- [x] **Production-safe environment values** — now enforced rather than
+      remembered: the production overlay pins `APP_ENV=production`,
+      `BYPASS_TCPA=false`, an empty `DNC_TEST_ALLOWLIST`,
+      `RESET_RATE_TABLE_ON_BOOT=false` and signature validation, and requires
+      every credential; the boot guard refuses thresholds below 75/50, an empty
+      or invalid `ACTIVE_STATES`, and a non-FTC DNC provider (all verified in
+      the real image, 2026-11-24).
+- [ ] **Fill `.env.production`** — external credentials, `PUBLIC_BASE_URL`,
+      `ACTIVE_STATES`, the agent's number; leave `OUTBOUND_ENABLED=false` until
+      the live smoke test.
+- [ ] **Regulatory review** — the items in
+      [`launch-dependencies-and-costs.md`](launch-dependencies-and-costs.md#regulatory-prerequisites)
+      (AI-voice consent wording, opt-out and recording disclosures, licensing,
+      state rules) signed off by counsel.
 
 When every box above and in §1–§9 is checked: **GO.**

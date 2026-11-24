@@ -6,7 +6,7 @@
 
 Eastwood takes purchased or inbound leads, decides who may lawfully be called and who is worth calling, and has **Imogen**, a realtime AI voice assistant, run the discovery call. She screens health, presents deterministic quotes, and books the prospect with a licensed human agent who closes. Every step is gated in code, not by prompting the model to behave.
 
-> **Status: pre-launch.** The application is built and test-verified (453 tests passing). The remaining go-live work is configuration, credentials, and data; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md).
+> **Status: pre-launch.** The application is built and test-verified (538 tests passing) and was verified end to end against an isolated stack with simulated providers. The remaining go-live work is credentials, registrations, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
 
 ---
 
@@ -80,14 +80,18 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 ### Compliance and security
 - TCPA calling windows for all 50 states + DC
 - Official FTC National DNC registry provider: downloads subscribed area codes, checksums and freshness-limits the dataset, and stores the SAN only as a fingerprint. A `local_csv` blocklist exists for development.
-- Production boot guards refuse to start with `BYPASS_TCPA=true`, a non-empty `DNC_TEST_ALLOWLIST`, no `EASTWOOD_API_KEY`, or Twilio signature validation disabled
+- **Two-key outbound launch:** nothing prospect-facing leaves the system unless `OUTBOUND_ENABLED=true` *and* an operator has authorized the campaign (`POST /api/outbound/resume`); `POST /api/outbound/halt` is the emergency stop. Every authorization and halt is recorded, and a fresh deployment starts halted
+- Every prospect-facing send — dial, follow-up SMS or callback, consent request, booking confirmation — re-checks opt-out, National DNC, lead status, and the calling window at send time
+- A texted STOP (signed `/twilio/sms` webhook) suppresses the number for calls and texts and cancels everything pending
+- Production boot guards refuse to start with `BYPASS_TCPA=true`, a non-empty `DNC_TEST_ALLOWLIST`, no `EASTWOOD_API_KEY`, Twilio signature validation disabled, a non-FTC DNC provider, a temporary-tunnel or non-HTTPS `PUBLIC_BASE_URL`, scoring thresholds below 75/50, a rate-table reset, or no campaign states
+- Only carrier rates with a recorded rate-sheet `source` are ever quoted as carrier rates; everything else is a labelled estimate
 - Twilio `X-Twilio-Signature` validation against a canonical URL; Facebook signature enforcement; constant-time bearer auth between services; fail-closed route classification; tenant pinning; and OpenAPI docs disabled
 - nginx exposes only signed webhooks and the media WebSocket; health, metrics, and session admin stay internal
 
 ### Operator APIs and observability
 - Closer cockpit (`/api/cockpit/queue`, `/api/cockpit/lead/{id}`): a best-first queue with placement and a suggested opener
 - Batch ROI and lead-source ROI computed live, call-outcome tagging, and a dashboard summary
-- 34 Prometheus metrics (27 agent, 7 core), Grafana, `scripts/turn_latency_report.sh`, and call-trace tooling
+- 36 Prometheus metrics (27 agent, 9 core), a provisioned Grafana "Eastwood operations" dashboard, `scripts/turn_latency_report.sh`, and call-trace tooling
 - Twilio answering-machine detection and an abandoned-session reaper
 
 ## What Eastwood does not do
@@ -129,7 +133,7 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 | AI | OpenAI Realtime `gpt-realtime-2` (voice "shimmer"), `gpt-4o-transcribe` with logprobs, tuned server VAD |
 | Data | PostgreSQL 16 (two databases, 11 SQL migrations), Apache Kafka 3.7 (KRaft), Redis 7 |
 | Infrastructure | Docker Compose (9 services), nginx 1.25, Prometheus, Grafana |
-| Testing | pytest (188 tests), `node:test` via tsx (265 tests, including end-to-end call simulations) |
+| Testing | pytest (273 tests), `node:test` via tsx (265 tests, including end-to-end call simulations) |
 | Legacy pipeline (`src/`) | kafka-python, psycopg 3, Redis idempotency keys, booking tokens, consent evidence packs |
 
 ## Repository layout
@@ -145,7 +149,8 @@ landing/         Static landing page, lead uploader, and risk-scan funnel (serve
 nginx/           Edge proxy config
 scripts/         DB init, migrations, turn-latency report
 showcase/        The public capabilities site (deployed to Vercel)
-docs/            Go-live checklist
+docs/            Go-live checklist; launch dependencies, credentials, and costs
+grafana/         Provisioned Prometheus datasource and operations dashboard
 ```
 
 ## Running locally
@@ -163,7 +168,19 @@ docker compose up --build     # Kafka, Postgres, Redis, core, agent, nginx, Prom
 | `19090` | Prometheus |
 | `13000` | Grafana |
 
-Leave `PUBLIC_BASE_URL` blank to create call sessions without placing real calls.
+Leave `PUBLIC_BASE_URL` blank to create call sessions without placing real calls. Outbound is disarmed by default (`OUTBOUND_ENABLED=false`).
+
+### Production
+
+A separate env file and project keep production apart from the development stack:
+
+```bash
+cp .env.production.example .env.production && chmod 600 .env.production   # fill in
+docker compose -p eastwood-prod --env-file .env.production \
+  -f docker-compose.yml -f docker-compose.production.yml up -d --build
+```
+
+Compose refuses to start until every required credential is set, the boot guard re-checks the values that reach eastwood-core, all host ports bind to `127.0.0.1` (put a TLS proxy or named tunnel in front of nginx), and outbound stays disarmed until it is both armed and authorized.
 
 ## Tests
 
