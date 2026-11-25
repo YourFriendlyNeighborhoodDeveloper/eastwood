@@ -57,6 +57,33 @@ a full calendar, 10-minute stall on lost callbacks, 1 GB Kafka heap, Canadian
 numbers not flagged, state names truncated to two letters, unbounded
 overbooking and UTC-shifted booking times.
 
+### SMS-first commercial acceptance — 2026-11-25
+
+Same isolation, simulated provider, scripted SMS prospects answering through
+the signed `/twilio/sms` webhook, and the synthetic rate sheet verified through
+`scripts/rates.py`. Details: [`sms-first-engine.md`](sms-first-engine.md#acceptance-results-2026-11-25).
+
+- **Tests:** eastwood-core **487 passed** (incl. OCR) + **24 database integration
+  passed**; ai-agent **270 passed**, TypeScript clean.
+- **Pipeline:** upload → preview → import → scrub → qualify → campaign → SMS →
+  replies → qualification → verified quote → booking → confirmation →
+  reminders → agent profile, for 1,444 leads.
+- **Imports:** CSV, XLSX and a scanned PDF (OCR) imported through the dashboard
+  APIs.
+- **Quotes:** 1,860 stored. **No dollar amount** went out that was not a stored
+  quote, and every premium equalled the rate book recomputed independently.
+- **Calendar:** 832 bookings filled it with **no double booking**; the rest were
+  waitlisted and outreach held.
+- **Opt-outs:** every STOP and decline honored.
+- **Throughput:** about 60 texts out and 58 in per second on one core process.
+- **Defects found and fixed:** 19 (sms-first-engine.md), including:
+  - a booking stampede that bounced one prospect 85 times
+  - tenant leaks in four queues
+  - "Life Insurance" read as final expense
+  - legacy follow-ups impersonating "Ryan" with false urgency and a made-up phone number
+  - the voice agent's $99 "Eastwood Preferred" fallback
+  - a deferred booking confirmation that never sent
+
 Defects found and fixed in the first run (commit `bdcbebb`): follow-ups and
 consent SMS bypassed every compliance gate; texted STOP never suppressed
 calls; synthetic seed rates were quoted as named carrier rates; Prometheus
@@ -216,41 +243,44 @@ unsafe value (verified in the real image, 2026-11-24).
 
 ## 4. Quote mode
 
-Choose and document **exactly one** launch mode. Ambiguous mixed mode is not
-permitted.
+A prospect only ever reads or hears a premium that came from a **verified
+carrier rate sheet**, stored with a quote reference
+(`PROSPECT_QUOTES_REQUIRE_VERIFIED=true`; pinned in the production overlay).
+The formula estimator and the CMS adapter are internal tools only. Details:
+[`sms-first-engine.md`](sms-first-engine.md#quoting-verified-rates-only).
 
-> **Fixed 2026-11-24:** with `RESET_RATE_TABLE_ON_BOOT=false`, boot used to seed
-> formula-generated "sample" rates under real carrier names, so every quote was
-> labelled a carrier rate and named a carrier. Nothing is seeded at boot now,
-> and only rows with a real `source` are quoted as carrier rates. Boot logs the
-> active mode: `QUOTE MODE: estimate-and-book …` or `carrier-rate (Mode B)`.
+> **Changed 2026-11-25:** the former "Mode A — estimate-and-book" (a
+> formula-fitted premium spoken to the prospect as an estimate) is retired.
+> Before that, on 2026-11-24, boot stopped seeding formula output under real
+> carrier names.
 
-### Mode A — estimate-and-book (recommended for first launch)
-- [x] `RESET_RATE_TABLE_ON_BOOT=false` *(pinned; with no provenance rows the
-      formula adapter is used)*
-- [x] `FormulaAdapter` output remains labeled `quote_type=estimated` *(verified)*
-- [x] `carrier_rate=false` *(verified)*
-- [x] `bindable=false` *(verified)*
-- [x] Carrier name stays **hidden from the prospect** (the tool returns `carrier:
-      null` for estimates) *(`toolHandlers.ts`; ai-agent quote tests)*
-- [ ] Imogen uses the approved estimate language: *"Based on what you told me, we
-      may be looking around $X per month. I'd like to book a licensed review to
-      confirm the exact carrier and final rate."*
+### Without verified rate sheets (today): book without a number
+- [x] Imogen states **no premium** by text or voice; she says the licensed
+      agent will run exact numbers and offers the appointment *(simulated
+      acceptance run 2026-11-25: no text to a life-insurance lead, for which no
+      sheet exists, contained a figure; integration test
+      `test_unquotable_case_still_books_without_a_number`; ai-agent
+      `get_quote` returns no number when core has none)*
+- [x] `bindable=false` on everything; the appointment is the close
 
-### Mode B — carrier-rate mode
-- [ ] Load validated carrier rate tables (`carrier_rate_tables`) with
-      `RESET_RATE_TABLE_ON_BOOT=false`. Every row needs a `source` naming the
-      rate sheet (rows with no source, or `synthetic_seed`, are ignored). There
-      is no import tool yet; loading is a manual, reviewed step.
-- [ ] Verify each row's `source` / `effective_date` (there is no `version` column)
-- [ ] Confirm quote labels show `rate_source=rate_table` (or `cms_api`) and
-      `carrier_rate=true`
-- [ ] `bindable` remains `false` (Eastwood submits no application; nothing binds)
-- [ ] Run a sample comparison against carrier quoting portals for a spread of
-      ages/face amounts before trusting the numbers on a call
-
-> Whichever mode: no quote Eastwood produces is bindable. The appointment with a
-> licensed agent is the close.
+### With verified rate sheets: preliminary carrier rates
+- [ ] Obtain each carrier's current rate book (through your appointment) or a
+      licensed rate source for every product and state you will quote
+- [ ] `python -m scripts.rates import rates.csv --meta meta.json` for each plan
+      (rates per $1,000 by age, sex, tobacco and tier; policy fee; modal
+      factors; rounding; effective and expiry dates; source document)
+- [ ] `python -m scripts.rates verify <sheet_id> --checks checks.csv --verified-by "<name>"`
+      with **at least three** spot checks copied from the carrier's own quote
+      tool, spread across ages, sexes, tobacco and tiers. Every one must match
+      to the cent, or the sheet stays `draft`
+- [ ] Spot-check more cases with `python -m scripts.rates quote …` against the
+      carrier portal before the first campaign
+- [ ] Retire a sheet when the carrier changes rates (`retire`). Expired sheets
+      stop quoting by themselves
+- [x] Quotes are stored with a reference and source, labelled preliminary, and
+      never bindable; texts can state only stored figures *(acceptance run)*
+- [x] Synthetic test sheets (`ALLOW_TEST_RATE_SHEETS`) are refused in
+      production *(boot guard + production overlay)*
 
 ---
 
@@ -388,6 +418,34 @@ Runbook: [`lead-import-and-campaigns.md`](lead-import-and-campaigns.md).
 - [ ] Decide what to do with `manual_review_only` leads (consent does not cover
       AI voice): they are never dialed by Eastwood.
 
+## 6c. SMS-first readiness
+
+Text is the default first contact ([`sms-first-engine.md`](sms-first-engine.md)).
+
+- [ ] **A2P 10DLC brand and campaign approved**, the sending number attached.
+      Sample messages: the opener and nudges in `domain/sms/playbook.py`;
+      opt-in description: your consent language; opt-out keywords STOP etc.
+- [ ] Know your throughput: the T-Mobile daily cap follows the brand's Trust
+      Score (2,000 / 10,000 / 40,000 / 200,000 segments a day) and is shared
+      by every campaign under your EIN. Set `SMS_MESSAGES_PER_MINUTE` and each
+      campaign's `messages_per_minute` / `daily_message_cap` below it
+- [ ] `AGENCY_DISPLAY_NAME` exactly as the consent names your agency
+      (required by the production overlay)
+- [ ] Consent covers **texts** and names your agency. The importer authorizes SMS
+      only then (`contact_authorization.sms`); check the inventory's SMS count
+- [ ] Twilio number's "A message comes in" webhook → `{PUBLIC_BASE_URL}/twilio/sms`
+      (delivery receipts are requested per message automatically)
+- [ ] `AGENT_AVAILABILITY`, `APPOINTMENT_MAX_PER_DAY` and
+      `AGENT_NOTIFICATION_PHONE_E164` set to the real agent's hours and phone
+- [ ] Optional: `SMS_LLM_PROVIDER=openai` (reads only unclear replies; needs
+      `OPENAI_API_KEY` in eastwood-core). Default `none` costs nothing
+- [x] Simulated commercial acceptance test passed (2026-11-25; see the
+      verification record above)
+- [ ] **Controlled live SMS test passed** with one phone you own
+      ([`controlled-live-sms-test.md`](controlled-live-sms-test.md))
+
+---
+
 ## 7. Controlled test campaign
 
 Outbound is a two-key launch. Nothing prospect-facing — dial, follow-up SMS or
@@ -514,11 +572,14 @@ are configuration, credentials, data, or third-party registration (updated
 - [ ] **Stable `PUBLIC_BASE_URL`** — currently a temporary ngrok tunnel (§5).
       Production now refuses to boot with a tunnel URL.
 - [ ] **A2P 10DLC registration** for the Twilio number (brand + campaign).
-      Eastwood sends SMS (follow-ups, consent requests, agent briefs); carriers
-      block unregistered 10DLC traffic.
+      SMS is now the default first contact; carriers block unregistered 10DLC
+      traffic (§6c).
 - [ ] **Twilio inbound SMS webhook** → `{PUBLIC_BASE_URL}/twilio/sms` (§5).
-- [ ] **An explicitly chosen quote mode** — default today is estimate-and-book via
-      the formula adapter; carrier rate tables are not loaded (§4).
+- [ ] **Verified carrier rate sheets**, or a conscious decision to launch
+      booking without a number (§4). No verified carrier rates exist yet; the
+      only sheet ever loaded is the synthetic test sheet.
+- [ ] **Controlled live SMS test** with one phone you own (§6c,
+      [`controlled-live-sms-test.md`](controlled-live-sms-test.md)).
 - [x] **Production-safe environment values** — now enforced rather than
       remembered: the production overlay pins `APP_ENV=production`,
       `BYPASS_TCPA=false`, an empty `DNC_TEST_ALLOWLIST`,

@@ -5,7 +5,7 @@ launch, and what it costs. The application work is done (see the verification
 record in [`go-live-checklist.md`](go-live-checklist.md)); everything here is an
 account, a credential, a registration, a legal sign-off, or money.
 
-Prices were checked on 2026-11-24 and change often. Confirm each one in the
+Prices were checked on 2026-11-24 (SMS, 10DLC and rate data re-checked 2026-11-25) and change often. Confirm each one in the
 provider's console or price sheet before paying. This is not legal advice; the
 regulatory section lists questions to settle with counsel.
 
@@ -104,6 +104,58 @@ to hundreds of area codes, so the fee runs from $0 (five area codes) to about
 $4,600 (59 area codes) and up to the $23,425 nationwide cap. Subscribing to the
 busiest area codes first buys most of the reach for a fraction of the fee.
 
+### SMS-first versus voice-first
+
+Text is now the default first contact ([`sms-first-engine.md`](sms-first-engine.md)).
+
+**Measured: what each SMS outcome costs.** These figures come from the
+2026-11-25 acceptance run (600 conversations through the real engine and
+webhooks, simulated provider). They are priced at $0.013 per outbound
+segment (Twilio $0.0083 + a $0.003–0.0045 carrier fee) and $0.010 per
+inbound segment.
+
+| Outcome | Texts out / in | Segments out | Cost |
+| --- | ---: | ---: | ---: |
+| Never replies (opener + 2 nudges, then dormant) | 3 / 0 | 3.0 | **$0.039** |
+| Opts out (STOP) | 1 / 1 | 1.0 | $0.023 |
+| Declines | 2 / 1 | 2.0 | $0.036 |
+| Qualified, quoted and **booked** (incl. confirmation and reminders) | 8.3 / 8.1 | 10.4 | **$0.216** |
+| Engaged, handed to the agent | 10.0 / 9.0 | 12.4 | $0.251 |
+
+The opener fits **one segment**. It was two before this round. The opener and the two
+nudges go to every non-responder, so they are most of the bill. The optional
+model reads only unclear replies, at about $0.0005 a read with `gpt-5-mini`.
+
+**Assumed: how aged leads respond.** Replace these rates with your pilot's
+own numbers.
+
+| | Low | Central | High |
+| --- | ---: | ---: | ---: |
+| Reply rate (SMS-first) | 5 % | 10 % | 18 % |
+| Repliers who opt out or decline | 45 % | 35 % | 25 % |
+| Engaged repliers who book | 25 % | 35 % | 45 % |
+
+Voice-first uses the per-1,000 model above (10–20 % reached, central $120
+and 20 appointments).
+
+**Usage cost and appointments.** The voice figures for 27,000 leads use the
+same per-lead model as the 1,000 and 5,000 columns.
+
+| Leads (authorized, DNC-cleared) | SMS-first, central | Voice-first, central | SMS-first range | Voice-first range |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | **$52**, ~23 appointments | **$120**, ~20 | $44–65, 7–61 | $55–290, 10–40 |
+| 5,000 | **$258**, ~114 | **$600**, ~100 | $222–325, 34–304 | $275–1,450, 50–200 |
+| 27,000 | **$1,395**, ~616 | **$3,240**, ~540 | $1,198–1,757, 186–1,642 | $1,485–7,830, 270–1,080 |
+| Cost per appointment | **≈ $2.27** | **≈ $6.00** | $1.07–6.46 | $5.50–7.25 |
+
+What holds regardless of the assumptions:
+
+- **Cost per lead.** SMS-first costs about **$0.044–0.065 per lead**, because most leads never reply and cost only three texts. Voice-first costs **$0.055–0.29 per lead**.
+- **Appointment yield is the unknown.** The controlled live test and a first pilot of a few hundred leads must measure it before scaling.
+- **Fixed costs.** Both channels need a 10DLC registration (voice-first sends follow-up texts too): a standard brand with secondary vetting is about $46 one-time, campaign vetting $15 one-time, and the campaign about $10 a month; the number is $1.15 a month.
+- **Rate data.** Texting exact premiums needs verified carrier rates: carrier rate books through your appointments (free, loaded and verified with `scripts/rates.py`) or a licensed rate source, such as Compulife's API plan, listed at about $429–480 a year and up to about $1,500 by quote volume (confirm with Compulife). Without rate data Imogen books without stating a number.
+- **The calendar sets the pace.** At the central rate, 100 appointments a month needs about 4,400 texted leads a month, so 27,000 leads take about 6 months. That is about 150 openers a day, well inside even the lowest T-Mobile daily cap of 2,000 segments for a low-trust brand.
+
 ---
 
 ## Mandatory expenses
@@ -113,7 +165,7 @@ busiest area codes first buys most of the reach for a fraction of the fee.
 | FTC National Do Not Call Registry subscription (SAN) | $0 for ≤5 area codes; then **$85 per area code per year** (FY2027, from Oct 1 2026); $43 per extra area code for a half year; $23,425 nationwide cap | Required to telemarket. Renew annually. Eastwood refuses production boot without it and needs the dataset refreshed at least every 31 days. |
 | Twilio local number | **$1.15/mo** | Caller ID for outbound calls and SMS sender. |
 | A2P 10DLC registration | Brand **$4.50** (low-volume) or **≈ $46** (standard, incl. secondary vetting), one-time; campaign vetting **$15** one-time (re-charged on resubmission); campaign **$1.50–10/mo** | Carriers block unregistered application-to-person SMS. Eastwood texts follow-ups, consent requests and agent briefs. Approval can take days to weeks — start early. |
-| Twilio usage | Outbound voice **$0.014/min**; AMD **$0.0075** per answered call; SMS **≈ $0.0083/segment + $0.0035–0.005** carrier fee; $0.001 per failed message | |
+| Twilio usage | Outbound voice **$0.014/min**; AMD **$0.0075** per answered call; SMS **≈ $0.0083/segment** each way **+ carrier fees** (T-Mobile 10DLC outbound $0.0045 since 2026-01-19, inbound $0.0025; AT&T ≈ $0.0035); $0.001 per failed message | SMS-first: ≈ $0.044–0.065 per lead worked (measured message counts, see above). |
 | OpenAI usage | Realtime audio ≈ **$32 / $64 per 1M** audio input / output tokens (third-party reported) → **≈ $0.05–0.15 per call minute**; `gpt-4o-transcribe` ≈ **$0.006/min** | The repo pins `gpt-realtime-2`; confirm that model's price and availability (one source reports the original `gpt-realtime` retiring on 2027-01-20). |
 | Stable HTTPS endpoint + server | **$0** (existing machine + free named tunnel + a domain you own) **or a 2 vCPU / 4 GB VPS** (the measured stack needs ~1.2 GB with Kafka capped; a 4 vCPU / 8 GB droplet is ≈ $48/mo if you want headroom) | Twilio must reach `PUBLIC_BASE_URL` for every call. A laptop that sleeps drops callbacks — fine for a supervised test, not for a campaign. TLS is free (Let's Encrypt or the tunnel). Domain ≈ $10–15/yr if you have none. |
 | Licensed closing agent | $0 if already licensed; Michigan resident producer: $10 application + $5 transaction fee, ≈ $41 per exam attempt, plus pre-licensing education | Must be licensed (life / health lines as applicable) in every campaign state, with carrier appointments. |
@@ -123,6 +175,7 @@ busiest area codes first buys most of the reach for a fraction of the fee.
 
 | Item | Cost | Without it |
 | --- | --- | --- |
+| Verified carrier rate data | $0 (carrier rate books through your appointments, loaded with `scripts/rates.py`) or a licensed rate source, e.g. Compulife API plan ≈ $429–480/yr, up to ≈ $1,500/yr by volume (listing sites; confirm) | Imogen books without stating any premium. |
 | Calendly Standard | ≈ $10–12 per seat per month | Booking still persists the requested time and alerts the agent; the prospect is never told a calendar booking is confirmed. Confirm Standard includes the Scheduling API you need. |
 | Extra registry area codes | $85 each per year | Mandatory for any area code you want to dial; optional only in that you can keep the campaign to five. |
 | Legal review (TCPA / insurance) | Get a fixed-fee quote | Strongly recommended before the first live call — see below. |
@@ -137,7 +190,8 @@ busiest area codes first buys most of the reach for a fraction of the fee.
 | Dependency | Used for | Credentials / configuration | State on 2026-11-24 |
 | --- | --- | --- | --- |
 | Twilio Programmable Voice, Media Streams, AMD | Outbound calls, audio to Imogen | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`; callbacks under `PUBLIC_BASE_URL` | Configured values are the pre-scrub exposed ones — **rotate** |
-| Twilio Messaging | Follow-ups, consent requests, agent briefs, opt-out intake | 10DLC brand + campaign; inbound webhook `POST {PUBLIC_BASE_URL}/twilio/sms` | Not configured |
+| Twilio Messaging | **SMS-first conversations (default first contact)**, follow-ups, agent briefs, opt-out intake, delivery receipts | 10DLC brand + campaign; inbound webhook `POST {PUBLIC_BASE_URL}/twilio/sms` (receipts are requested per message) | Not configured |
+| Carrier rate sheets | The only source of a premium a prospect sees | `scripts/rates.py import` + `verify` (≥ 3 carrier spot checks) | **None loaded** (only the synthetic test sheet, refused in production) |
 | OpenAI Realtime + `gpt-4o-transcribe` | Imogen's voice and transcript grounding | `OPENAI_API_KEY` | Exposed key — **rotate** |
 | FTC National DNC Registry | Clearing numbers to dial | `DNC_SAN`, `DNC_REGISTRY_USERNAME`, `DNC_REGISTRY_PASSWORD`, `DNC_AREA_CODES`, `DNC_REGISTRY_DOWNLOAD_URL` | Not configured |
 | Public HTTPS origin | Every Twilio webhook | `PUBLIC_BASE_URL` (stable, HTTPS, not a temporary tunnel) | Temporary ngrok URL in dev only |
@@ -235,6 +289,8 @@ Confirm each of these with counsel before any lead in the book is contacted:
 - FTC FY2027 registry fees: [FTC press release (Aug 2026)](https://www.ftc.gov/news-events/news/press-releases/2026/08/ftc-announces-2027-telemarketer-fees-access-national-do-not-call-registry), [Greenspoon Marder](https://www.gmlaw.com/news/compliance-reminder-ftc-increases-national-do-not-call-registry-fees-for-fy-2027/)
 - Twilio: [voice pricing (US)](https://www.twilio.com/en-us/voice/pricing/us), [SMS pricing (US)](https://www.twilio.com/en-us/sms/pricing/us), [A2P 10DLC](https://www.twilio.com/en-us/phone-numbers/a2p-10dlc), [T-Mobile carrier fee change](https://support.twilio.com/hc/en-us/articles/44609260499995-T-Mobile-Messaging-Carrier-Fee-Changes-January-2026), [10DLC fee summary](https://a2pready.com/a2p-10dlc-fees/)
 - OpenAI: [Realtime pricing summary (layer3labs)](https://www.layer3labs.io/guides/openai-realtime-api-pricing), [cost per minute (cekura)](https://www.cekura.ai/blogs/openai-realtime-api-pricing), [gpt-4o-transcribe model page](https://developers.openai.com/api/docs/models/gpt-4o-transcribe)
+- 10DLC throughput and fees: [T-Mobile daily limits by Trust Score (Twilio)](https://support.twilio.com/hc/en-us/articles/1260804800549-T-Mobile-Daily-Message-Limits-for-Long-Code-Messaging-with-A2P-10DLC), [throughput and Trust Scores (Twilio)](https://support.twilio.com/hc/en-us/articles/1260803225669-Message-throughput-MPS-and-Trust-Scores-for-A2P-10DLC-in-the-US), [brand registration fees (Twilio)](https://www.twilio.com/docs/trust-hub/registrations/a2p-10dlc-brand), [brand types compared (Twilio)](https://support.twilio.com/hc/en-us/articles/4407882914971-Comparison-between-Starter-Low-Volume-Standard-and-Standard-registration-for-A2P-10DLC)
+- Rate data: [Compulife pricing (Capterra)](https://www.capterra.com/p/81783/Compulife-Quote-Software/pricing/), [Compulife (FitGap)](https://us.fitgap.com/products/032079/compulife-quote)
 - Hosting: [DigitalOcean droplet pricing](https://www.digitalocean.com/pricing/droplets)
 - Calendly: [pricing](https://calendly.com/pricing)
 - Michigan licensing: [DIFS — becoming a resident producer](https://www.michigan.gov/difs/industry/licensing-ins/agnt-ins/general-info/how-to-become-licensed-as-a-resident-producer), [exam cost (Aceable)](https://insurance.aceable.com/resources/pre-license/how-much-is-the-michigan-insurance-licensing-exam/)

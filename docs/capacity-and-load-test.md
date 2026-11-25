@@ -1,4 +1,4 @@
-# Capacity and load test — 27,000 leads (2026-11-24)
+# Capacity and load test — 27,000 leads (2026-11-24) and SMS-first (2026-11-25)
 
 How Eastwood behaved with a 27,000-lead book and a sustained simulated
 campaign, and what server it needs. Every number below was measured; none is
@@ -125,6 +125,35 @@ Database: ~2.5 KB per lead including consent evidence and indexes — a
 The simulated calls carried no audio. Real calls stream 8 kHz audio both ways
 through ai-agent (≈ 0.2–0.3 Mbit/s per call) and hold an OpenAI realtime socket;
 at the 1–3 concurrent calls a part-time operation needs, that is negligible.
+
+## SMS-first engine (2026-11-25)
+
+**Setup.** The same isolated stack, with simulated prospects answering Imogen's texts through the
+signed `/twilio/sms` webhook ([sms-first-engine.md](sms-first-engine.md#acceptance-results-2026-11-25)).
+1,444 textable leads were worked in two waves (600, then 844) against one calendar: 15-minute
+slots, 08:00–22:00, 56 a day, 14 days.
+
+| Measure | Result |
+| --- | --- |
+| Engine throughput (one core process) | **≈ 60 texts out + 58 in per second** sustained (≈ 7,000 messages a minute), peak 126/s; up to 8 bookings a second |
+| Reply latency (prospect text → Imogen's answer) | p50 **0.15 s**, p95 **2.7 s** |
+| Calendar at capacity | 832 bookings filled the calendar; 0 double-booked, ≤ 56 a day; later bookers waitlisted; new outreach held. Follow-ups and nudges kept running |
+| Core memory | ≈ 100–260 MB |
+
+**Measurement note.** In the first runs the load generator itself used about two thirds of the
+core's CPU: it opened a new HTTP client, and so a new TLS context, for every simulated reply
+and receipt. With one shared client the same process carries about 3× the traffic. The
+simulated prospects still run inside the core process, so production (no simulator) has more
+headroom than measured.
+
+**The engine is not the limit.**
+- **Carriers.** 10DLC throughput is set per brand. T-Mobile caps a low-trust brand at 2,000
+  segments a day, and a sole-proprietor brand sends 1 message a second.
+- **The calendar.** At the central response assumption, 100 appointments a month needs about
+  150 openers a day.
+
+Set `SMS_MESSAGES_PER_MINUTE` and the campaign's `messages_per_minute` / `daily_message_cap` to
+the carrier limits, not to the engine's capacity.
 
 ## Recommended server
 

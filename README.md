@@ -4,33 +4,38 @@
 
 **Live overview:** [eastwood-two.vercel.app](https://eastwood-two.vercel.app)
 
-Eastwood takes purchased or inbound leads, decides who may lawfully be called and who is worth calling, and has **Imogen**, a realtime AI voice assistant, run the discovery call. She screens health, presents deterministic quotes, and books the prospect with a licensed human agent who closes. Every step is gated in code, not by prompting the model to behave.
+Eastwood takes purchased or inbound leads, decides who may lawfully be contacted and who is worth contacting, and has **Imogen**, an AI assistant, work them. Text comes first: a two-way SMS conversation that qualifies the prospect, quotes only from verified carrier rate sheets, and books them with a licensed human agent who closes. A realtime voice mode runs the same discovery by phone when a campaign opts in. Every step is gated in code, not by prompting a model to behave.
 
-> **Status: pre-launch.** The application is built and test-verified (625 tests passing, plus 6 database integration tests) and was verified end to end — including a 27,000-lead load test — against an isolated stack with simulated providers. The remaining go-live work is credentials, registrations, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
+> **Status: pre-launch.** The application is built and test-verified (757 unit and end-to-end tests, plus 24 database integration tests). It was verified end to end against an isolated stack with simulated providers: a 27,000-lead voice load test, and an SMS-first commercial acceptance test from upload to booked appointment (1,444 leads; every stated premium matched the rate book; no double booking). The remaining go-live work is credentials, registrations, verified carrier rates, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md), [`docs/sms-first-engine.md`](docs/sms-first-engine.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
 
 ---
 
 ## How a lead moves through Eastwood
 
 ```
- ingest ─► normalize ─► [compliance gates] ─► triage & score ─► [dial queue]
-                                                                     │
-   follow-ups ◄── book & hand off ◄── [quote] ◄── Imogen's discovery call
+ ingest ─► normalize ─► [compliance gates] ─► triage & score ─► [campaign]
+                                                                    │
+     SMS-first (default): Imogen texts ─► qualify ─► [verified quote] ─► book ─┐
+     voice (opt-in):      [dial queue] ─► Imogen's call ─► [quote] ─────► book ─┤
+                                                                               ▼
+                     appointment + full prospect profile ─► the licensed agent closes
 ```
 
 1. **Ingest:** vendor CSVs (fuzzy column mapping), PDF lead exports, `POST /api/leads/ingest`, signed Facebook Lead Ads webhooks, and web forms.
 2. **Normalize:** E.164 phones, product lines, age from DOB, and consent records. Unmapped columns are kept for audit.
 3. **Compliance gates** (hard stops): TCPA 8am–9pm in the lead's local time, National DNC clearance (fail-closed), entity-specific opt-outs, and express written consent for auto-dial.
 4. **Triage & score:** medical knockouts, severity scoring, and wealth/fit signals, then a route: `auto_dial`, `request_consent_sms`, `nurture`, `manual_review`, or `suppress`.
-5. **Dial queue** (hard stop): concurrency cap, a 4/24/32/56/80-hour retry ladder, max attempts, and idempotent Twilio status handling.
-6. **Imogen's call:** discloses she is an AI, confirms identity, runs needs discovery and health screening, and captures only what she clearly heard.
-7. **Quote** (hard stop): unlocks only after discovery. The engine picks three options; the model only explains them.
-8. **Book & hand off:** a real Calendly booking, a persisted prospect profile, and an SMS brief to the licensed agent. Outcome-aware follow-up sequences run afterward.
+5. **Text conversation (default):** Imogen's first text names the agency, says she is an AI assistant, and says how to opt out. She asks only what the quote needs, handles objections and questions, and nudges twice if there is no reply. Every text comes from reviewed templates and passes a policy check; the model, when enabled, only reads unclear replies. See [`docs/sms-first-engine.md`](docs/sms-first-engine.md).
+6. **Voice (opt-in per campaign):** a dial queue with a concurrency cap and retry ladder, and Imogen's realtime call, which runs discovery and health screening and captures only what she clearly heard.
+7. **Quote** (hard stop): unlocks only after discovery. A premium reaches a prospect only from a **verified** carrier rate sheet and is stored with a quote reference. The engine picks the options; the model only explains them.
+8. **Book & hand off:** a booking on the agent's own calendar (or Calendly), a confirmation and reminders, a persisted prospect profile, and a brief to the licensed agent. Outcome-aware follow-up sequences run afterward.
 
 ## Capabilities
 
 ### Lead intake
-- Any vendor CSV, mapped to canonical fields by fuzzy column matching; PDF table extraction feeds the same mapper
+- Any vendor CSV or XLSX, mapped to canonical fields by fuzzy column matching
+- PDF lead lists: ruled tables, column-aligned text, and scanned or photographed pages read by local OCR (Tesseract; lead data never leaves the server). Low-confidence rows are quarantined for review
+- Upload-and-preview in the operator dashboard: see how every column will be read, fix the mapping, then import
 - HTTP ingest API and signature-verified Facebook Lead Ads (`leadgen`) webhook
 - Browser lead uploader (`landing/upload.html`) and a 60-second "risk scan" web funnel (`landing/site/`)
 - Lead batches tied to vendor and cost for ROI tracking
@@ -49,6 +54,13 @@ Eastwood takes purchased or inbound leads, decides who may lawfully be called an
 - Spend ledger (estimated from configurable unit prices) and a per-call attempt log
 - The licensed agent's own part-time calendar: weekly windows, slot length, buffers, daily cap, blackout dates; overbooking is prevented by an advisory lock plus a unique index
 - Operations report: attempts, answered calls, qualified prospects, appointments, opt-outs, conversion rates, cost per appointment
+
+### Imogen by text (SMS-first, the default)
+- Two-way conversation with stored history: qualify (coverage, age, tobacco, sex, the rate sheet's own health questions, budget), quote, handle objections and questions, book, confirm, remind (24 h and 2 h), reschedule and cancel
+- Stops on a booking, a decline, a wrong number, or STOP. Hands off to the agent when the prospect asks for a person or the texts are not working. Optional escalation to an AI voice call
+- Every outbound text passes a policy check: only stored quote figures, no guarantees, no Medicare "government benefit" claims, no SSN or bank requests, GSM-7 only, at most 3 segments, and a compliant first text
+- Send-time gates: two-key outbound, SMS consent naming your agency, National DNC, suppression, 8am–9pm local, daily and campaign budgets, rate limits, at most once per step. Cost guards: one-segment openers, two nudges then dormant, a 30-text conversation cap, and outreach paused while the calendar is full
+- Simultaneous choosers are offered different times, and the calendar never double-books
 
 ### Enrichment, scoring, and routing
 - Optional OpenFEC donor and NPPES NPI provider lookups
@@ -78,10 +90,11 @@ Eastwood takes purchased or inbound leads, decides who may lawfully be called an
 `update_lead_field`, `add_followup_questions`, `get_quote`, `select_quote_option`, `get_booking_slots`, `book_appointment`, `capture_consent`, `capture_objection`, `capture_dnc`, `transfer_live`, `transfer_to_human`, `end_call`. Availability is derived from what has been captured (`ai-agent/src/tools/toolGating.ts`). After a do-not-call request, only `end_call` remains.
 
 ### Quoting
-- Deterministic three-option quotes (C minimum / B recommended / A maximum within budget) in `domain/quoting/options.py`
-- Adapters: CMS Medicare data API, carrier rate tables, and formula estimates, merged by source priority
-- Honesty labels persisted with every quote: `quote_type`, `rate_source`, `carrier_rate`, `bindable` (always `false`)
-- The carrier name is hidden on estimates, and premium-per-$1k sanity bands veto implausible numbers
+- **Prospects see verified rates only.** Carrier rate books are loaded as rate sheets (`scripts/rates.py`: age, sex, tobacco, tier, policy fee, modal factors, rounding, effective dates, source document) and quote only after at least three spot checks from the carrier's own quote tool match to the cent
+- Every option a prospect sees is stored with a quote id, a short `Q` reference, its source and rate sheet. A text can state only those figures. Quotes are labelled preliminary and never bindable
+- With no verified sheet for a prospect, Imogen says she cannot give an exact rate and offers the agent. She never estimates
+- Deterministic three-option logic (C need / B recommended / A most within budget)
+- The formula and CMS adapters remain internal tools only (`PROSPECT_QUOTES_REQUIRE_VERIFIED=true`). Synthetic test sheets exist for testing and are refused in production
 
 ### Live policy engine
 Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply Medicare plans are a government benefit, read back SSNs or bank details, or offer a vague premium range when exact quotes exist.
@@ -104,6 +117,8 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 - nginx exposes only signed webhooks and the media WebSocket; health, metrics, and session admin stay internal
 
 ### Operator APIs and observability
+- Operator dashboard at `/ops` (core port only; not exposed by nginx): upload and map leads, create and launch campaigns, authorize or halt outbound, read conversations, see appointments with full profiles, and record attended, no-show, and sold outcomes with premium and commission
+- Overview metrics: leads imported, texts sent and replies, active conversations, qualified prospects, quotes communicated, appointments and attendance, policies sold, spend, cost per booked appointment, commissions, and profit
 - Closer cockpit (`/api/cockpit/queue`, `/api/cockpit/lead/{id}`): a best-first queue with placement and a suggested opener
 - Batch ROI and lead-source ROI computed live, call-outcome tagging, and a dashboard summary
 - 37 Prometheus metrics (27 agent, 10 core), a provisioned Grafana "Eastwood operations" dashboard, `scripts/turn_latency_report.sh`, and call-trace tooling
@@ -116,9 +131,10 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 - **Dial without clearance:** never outside 8am–9pm local, never to a number that isn't explicitly `clear` or `exempt` on the DNC registry, and never auto-dial without express written consent.
 - **Invent answers.** Unheard or unclear means the slot stays unknown.
 - **Collect SSNs or bank details,** promise approval, or imply Medicare plans are a government benefit.
+- **Invent prices.** A premium reaches a prospect only from a verified carrier rate sheet, with a stored quote id. Otherwise there is no number.
 - **Name a carrier on an estimate,** or quote before discovery is complete.
 - **Bridge live transfers automatically.** It texts the closer to call in.
-- **Handle inbound calls, serve multiple tenants, or ship an operator UI.** It is outbound-only and single-tenant, with JSON APIs and Grafana dashboards.
+- **Handle inbound calls or serve multiple tenants.** It is outbound-first and single-tenant. The operator UI is one dashboard page (`/ops`); the rest is JSON APIs and Grafana.
 
 ## Architecture
 
@@ -143,12 +159,12 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 
 | Layer | Technologies |
 | --- | --- |
-| Core service | Python 3.11, FastAPI, Uvicorn, Pydantic v2 + pydantic-settings, SQLAlchemy 2 (async) + asyncpg, Alembic, aiokafka, httpx, tenacity, twilio, phonenumbers, structlog, orjson, cryptography, prometheus-client |
+| Core service | Python 3.11, FastAPI, Uvicorn, Pydantic v2 + pydantic-settings, SQLAlchemy 2 (async) + asyncpg, Alembic, aiokafka, httpx, tenacity, twilio, phonenumbers, structlog, orjson, cryptography, prometheus-client, openpyxl, pdfplumber, pypdfium2 + Tesseract OCR |
 | Voice agent | Node.js ≥ 20, TypeScript 5 (strict), Fastify 4 + @fastify/websocket, ws, XState 5, Zod, KafkaJS, Prisma 5, Pino, prom-client, tsx |
 | AI | OpenAI Realtime `gpt-realtime-2` (voice "shimmer"), `gpt-4o-transcribe` with logprobs, tuned server VAD |
 | Data | PostgreSQL 16 (two databases, 11 SQL migrations), Apache Kafka 3.7 (KRaft), Redis 7 |
 | Infrastructure | Docker Compose (9 services), nginx 1.25, Prometheus, Grafana |
-| Testing | pytest (356 unit + 6 database integration tests), `node:test` via tsx (269 tests, including end-to-end call simulations), a 27,000-lead load test with a simulated telephone provider |
+| Testing | pytest (487 unit tests incl. OCR, + 24 database integration tests), `node:test` via tsx (270 tests, including end-to-end call simulations), a 27,000-lead voice load test and an SMS-first acceptance test with simulated providers |
 | Legacy pipeline (`src/`) | kafka-python, psycopg 3, Redis idempotency keys, booking tokens, consent evidence packs |
 
 ## Repository layout
@@ -164,7 +180,8 @@ landing/         Static landing page, lead uploader, and risk-scan funnel (serve
 nginx/           Edge proxy config
 scripts/         DB init, migrations, turn-latency report
 showcase/        The public capabilities site (deployed to Vercel)
-docs/            Go-live checklist; launch dependencies and costs; import and campaign runbook; capacity and load test
+docs/            Go-live checklist; launch dependencies and costs; SMS-first engine; controlled live
+                 SMS test; import and campaign runbook; capacity and load test
 grafana/         Provisioned Prometheus datasource and operations dashboard
 ```
 

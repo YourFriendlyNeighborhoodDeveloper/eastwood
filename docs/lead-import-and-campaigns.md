@@ -19,7 +19,28 @@ production host) and every call needs `-H "Authorization: Bearer $EASTWOOD_API_K
   a former employer — does **not** authorize your AI-voice calls or texts, and
   those leads are quarantined (reason `consent_other_seller`).
 
-## 1. Import (CSV or XLSX)
+## The short way: the operator dashboard
+
+Open `http://127.0.0.1:18080/ops` on the server (an SSH tunnel from your
+laptop works). Enter `EASTWOOD_API_KEY` once per browser session.
+
+1. **Upload.** Drop a CSV, XLSX or PDF (scanned pages are read by local OCR).
+   The preview shows how every column will be read, the first rows exactly as
+   they will import, and the rows that need a look. Re-map any column, then
+   **Import** with the source, owner, acquisition date and lead-use
+   authorization. The National DNC scrub and qualification (§3) run by
+   themselves afterwards.
+2. **Campaign.** Create one (SMS-first is the default; set the budget and
+   texts per minute), **Enqueue leads**, then **Launch**.
+3. **Authorize outbound** (operator name and reason). **HALT** stops
+   everything.
+4. **Appointments.** Each arrives with the full prospect profile; record
+   attended, no-show or sold (with premium and commission) for the metrics.
+
+The rest of this page is the same flow from the command line, with the
+details.
+
+## 1. Import (CSV, XLSX or PDF)
 
 ```bash
 docker compose exec eastwood-core python -m scripts.leads import /app/imports/book.xlsx \
