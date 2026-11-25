@@ -32,7 +32,7 @@ and a domain you already control.
 | --- | --- |
 | One-time | ≈ $61 (standard 10DLC brand with secondary vetting ≈ $46 + campaign vetting $15) |
 | Yearly | FTC registry: **$85 × (area codes − 5)** — e.g. 20 area codes = $1,275; 30 = $2,125 |
-| Monthly | ≈ $59 (4 vCPU / 8 GB VPS ≈ $48 + number $1.15 + campaign $10) |
+| Monthly | ≈ $35–60 (2 vCPU / 4 GB VPS, or ≈ $48 for 4 vCPU / 8 GB, + number $1.15 + campaign $10) |
 | Usage | ≈ $0.07–0.17 per connected minute; $0.0075 per answered call (AMD); ≈ $0.012–0.014 per SMS segment |
 
 The registry is billed **per phone area code, not per state** — a lead's mobile
@@ -40,6 +40,69 @@ number frequently carries an out-of-state area code. Count the distinct area
 codes in the list you intend to dial. Numbers in unsubscribed area codes stay
 `unknown` and are never dialed, so the subscription also sets the campaign's
 reach.
+
+---
+
+## Operating a 27,000-lead book
+
+### What a call costs
+
+| Outcome | Billed | Estimated cost |
+| --- | --- | --- |
+| No answer, busy, failed | nothing (outbound voice bills connected minutes) | ≈ $0 |
+| Voicemail / machine (~30–45 s) | 1 voice minute + ~0.6 AI minute | ≈ $0.05–0.11 |
+| Conversation with a person (4–7 min) | 5–7 voice minutes + 4–7 AI minutes + transcription | ≈ $0.30–1.20 |
+| Follow-up text (SMS-authorized leads only) | 1 segment + carrier fee | ≈ $0.012–0.014 |
+
+The AI minute dominates. It is priced here at $0.05–0.15 (third-party reports for
+current realtime models); reconcile against your first OpenAI invoice and set
+`COST_AI_PER_MIN_USD` so the budget guard tracks reality.
+
+### Per 1,000 dialable leads
+
+**Assumptions, not measurements** (aged leads, up to 3 attempts each): ~2,200
+attempts; a person reached on 10–20 % of leads; a voicemail on ~40 %; a quote
+on 30–50 % of conversations; an appointment on 25–40 % of quotes.
+
+| | Low | Central | High |
+| --- | ---: | ---: | ---: |
+| Conversations | 100 | 150 | 200 |
+| Usage cost | $55 | $120 | $290 |
+| Appointments | 10 | 20 | 40 |
+| Cost per appointment | ≈ $3 | ≈ $6 | ≈ $12 |
+
+The load test's simulated mix (26 % of attempts reaching a person, 6.75-minute
+average conversations, AI at $0.15/min) measured **$0.31 per attempt and $1.20
+per answered call** over 2,956 attempts — the high end of this range.
+
+### The whole book
+
+Only **dialable** leads cost anything to call: authorized for AI voice (consent
+names your agency), DNC-cleared, in an active state. Run the inventory to get
+the real number. Scaled from the table above:
+
+| Dialable leads | Usage (central) | Appointments (central) |
+| ---: | ---: | ---: |
+| 2,000 | ≈ $240 | ≈ 40 |
+| 10,000 | ≈ $1,200 | ≈ 200 |
+| 27,000 (every lead authorized) | ≈ $3,200 (range $1,500–7,800) | ≈ 540 |
+
+**Measured:** in the 27,000-lead load test the dialer filled a 50-slot
+calendar within ~1,150 attempts (≈ $7–9 per appointment); the next ~1,800
+attempts (~$560) could not book anyone. Eastwood now holds dialing while your
+calendar has no open slot ([capacity-and-load-test.md](capacity-and-load-test.md)).
+
+**Your calendar is the real pacing limit.** Four appointments a day, six days a
+week is about 100 a month, which is roughly 5,000 dialable leads a month at the
+central conversion rate. Working all 27,000 at that pace takes 5–6 months, so
+the monthly usage bill is roughly $500–700 rather than $3,200 at once. Set
+`daily_budget_usd` on the campaign to match the calendar.
+
+**Registry access** is billed by area code. Price it from the inventory's coverage
+curve. A former-employer book drawn from several states typically spans dozens
+to hundreds of area codes, so the fee runs from $0 (five area codes) to about
+$4,600 (59 area codes) and up to the $23,425 nationwide cap. Subscribing to the
+busiest area codes first buys most of the reach for a fraction of the fee.
 
 ---
 
@@ -52,7 +115,7 @@ reach.
 | A2P 10DLC registration | Brand **$4.50** (low-volume) or **≈ $46** (standard, incl. secondary vetting), one-time; campaign vetting **$15** one-time (re-charged on resubmission); campaign **$1.50–10/mo** | Carriers block unregistered application-to-person SMS. Eastwood texts follow-ups, consent requests and agent briefs. Approval can take days to weeks — start early. |
 | Twilio usage | Outbound voice **$0.014/min**; AMD **$0.0075** per answered call; SMS **≈ $0.0083/segment + $0.0035–0.005** carrier fee; $0.001 per failed message | |
 | OpenAI usage | Realtime audio ≈ **$32 / $64 per 1M** audio input / output tokens (third-party reported) → **≈ $0.05–0.15 per call minute**; `gpt-4o-transcribe` ≈ **$0.006/min** | The repo pins `gpt-realtime-2`; confirm that model's price and availability (one source reports the original `gpt-realtime` retiring on 2027-01-20). |
-| Stable HTTPS endpoint | **$0** (existing machine + free named tunnel + a domain you own) **or ≈ $42–48/mo** (4 vCPU / 8 GB VPS) | Twilio must reach `PUBLIC_BASE_URL` for every call. A laptop that sleeps drops callbacks — fine for a supervised test, not for a campaign. TLS is free (Let's Encrypt or the tunnel). Domain ≈ $10–15/yr if you have none. |
+| Stable HTTPS endpoint + server | **$0** (existing machine + free named tunnel + a domain you own) **or a 2 vCPU / 4 GB VPS** (the measured stack needs ~1.2 GB with Kafka capped; a 4 vCPU / 8 GB droplet is ≈ $48/mo if you want headroom) | Twilio must reach `PUBLIC_BASE_URL` for every call. A laptop that sleeps drops callbacks — fine for a supervised test, not for a campaign. TLS is free (Let's Encrypt or the tunnel). Domain ≈ $10–15/yr if you have none. |
 | Licensed closing agent | $0 if already licensed; Michigan resident producer: $10 application + $5 transaction fee, ≈ $41 per exam attempt, plus pre-licensing education | Must be licensed (life / health lines as applicable) in every campaign state, with carrier appointments. |
 | Credential rotation | $0 | Twilio auth token and OpenAI key (see the go-live checklist §1). |
 
@@ -135,6 +198,35 @@ Settle each with counsel before the first live call.
    and scope-of-appointment rules. Launch with **final-expense leads only**;
    Eastwood has no product-line switch yet, so filter the import.
 10. **SMS.** A2P 10DLC registration; every template already carries "Reply STOP".
+
+### A book of leads from a former employer
+
+Confirm each of these with counsel before any lead in the book is contacted:
+
+- **Right to use the leads.** Get a written assignment or purchase agreement
+  from the former employer. Check your separation, non-solicitation and
+  confidentiality terms, and whether the list is a trade secret. Eastwood
+  quarantines the whole batch when the import has no `--use-authorization`
+  reference.
+- **Consent does not transfer.** Prior express written consent authorizes the
+  seller it names. Consent given to your former employer does not let your
+  agency place AI-voice (artificial voice) calls or send marketing texts.
+  Eastwood quarantines those leads (`consent_other_seller`), so expect most of
+  this book to need fresh consent or manual handling.
+- **No inherited exemptions.** An established business relationship belongs to
+  the seller that had it, so it does not exempt your calls from the National DNC
+  Registry.
+- **What remains possible** (counsel to confirm):
+  - Your own **manual** calls (no artificial voice, no autodialer) to numbers
+    that are **not** on the National DNC Registry, within calling hours. These
+    are the `manual_review_only` leads in the inventory.
+  - Re-establishing consent through channels that need none to start with,
+    such as mail, a compliant email, or an inbound web form naming your agency
+    with AI-voice and text disclosure.
+- **State lists and rules.** If the book reaches beyond Michigan, some states
+  (Indiana and Texas, for example) keep their own do-not-call lists. Some, such
+  as Florida, set narrower calling hours or limit attempts per day. Verify each
+  state before adding it to `ACTIVE_STATES`.
 
 ---
 

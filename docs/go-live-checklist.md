@@ -42,7 +42,22 @@ from simulation are noted inline, and live-provider steps stay open.
 | Recovery | core restart (state intact); Kafka outage (ingest fails loudly, core stays up, consumer resumes); stuck `dialing` slot reaped; ai-agent restart |
 | Production fail-closed | real image refuses to boot for each of: TCPA bypass, DNC allowlist, no API key, `local_csv`, ngrok URL, 5/5 thresholds, rate-table reset, invalid state; a valid production config boots **disarmed**; the production overlay refuses to start without external credentials |
 
-Defects found and fixed in that run (commit `bdcbebb`): follow-ups and
+### 27,000-lead readiness — 2026-11-24 (second run)
+
+Load test with 27,000 synthetic leads and the simulated telephony provider
+(details: [`capacity-and-load-test.md`](capacity-and-load-test.md)):
+CSV import 1,811 rows/s, XLSX 1,410 rows/s, killed-and-resumed import exact,
+idempotent re-import a no-op; DNC scrub 1,209/s; 271 dial attempts/min
+sustained at 20 concurrent; campaign ceiling halted outbound at $599.08 of $600
+and $899.32 of $900; daily ceiling held dialing without halting; 50 bookings =
+calendar capacity with no double booking; core crash recovered in 10–11 s and
+lost callbacks were reconciled in 129 s. Defects found and fixed: soft budget
+ceilings (now provider-enforced call cap + reserve + SMS checks), dialing past
+a full calendar, 10-minute stall on lost callbacks, 1 GB Kafka heap, Canadian
+numbers not flagged, state names truncated to two letters, unbounded
+overbooking and UTC-shifted booking times.
+
+Defects found and fixed in the first run (commit `bdcbebb`): follow-ups and
 consent SMS bypassed every compliance gate; texted STOP never suppressed
 calls; synthetic seed rates were quoted as named carrier rates; Prometheus
 scraped a non-existent target; compose never forwarded DNC/state/threshold
@@ -354,6 +369,25 @@ Verified against live Docker stack:
 
 ---
 
+## 6b. Lead book (27,000-lead import)
+
+Runbook: [`lead-import-and-campaigns.md`](lead-import-and-campaigns.md).
+
+- [ ] **Written lead-use authorization** from the leads' owner (assignment or
+      purchase agreement) — referenced on the import. Without it every lead is
+      quarantined (`lead_use_unauthorized`). Also confirm with counsel that using
+      a former employer's leads does not breach a non-solicitation, confidentiality
+      or trade-secret obligation.
+- [ ] `CONSENT_AUTHORIZED_SELLERS` set to your agency **exactly as consent
+      disclosures name it**. Consent that names the former employer does not
+      authorize your AI-voice calls or texts; expect those leads in quarantine.
+- [ ] Import the file; review `scripts.leads report` and the error CSV.
+- [ ] Review the inventory: eligible counts, quarantine reasons, and the FTC
+      registry coverage curve — choose the area codes to subscribe from it.
+- [ ] Run `scripts.leads scrub` after the registry download, then `qualify`.
+- [ ] Decide what to do with `manual_review_only` leads (consent does not cover
+      AI voice): they are never dialed by Eastwood.
+
 ## 7. Controlled test campaign
 
 Outbound is a two-key launch. Nothing prospect-facing — dial, follow-up SMS or
@@ -368,6 +402,13 @@ within 3 s and the follow-up worker within 30 s; connected calls finish
 normally. `GET /api/outbound/status` shows the state. A fresh deployment has
 never been authorized and starts halted; a halt survives restarts.
 
+- [ ] Create a campaign with a **small budget ceiling** (e.g. $25), a
+      `daily_budget_usd`, `max_concurrent_calls=1` and a low `calls_per_minute`;
+      enqueue with `limit` 5–10. Confirm the ceiling halts outbound when reached
+      (verified with the simulated provider, 2026-11-24).
+- [ ] Set `AGENT_AVAILABILITY` to your real part-time hours and
+      `APPOINTMENT_MAX_PER_DAY`; confirm `GET /api/scheduling/availability` offers
+      only those slots.
 - [ ] Use a **tiny, operator-approved list** first — **5 to 10 numbers**,
       preferably numbers you control or have explicit consent to call.
 - [ ] Verify **every number is `clear` or `exempt`** before dialing (query

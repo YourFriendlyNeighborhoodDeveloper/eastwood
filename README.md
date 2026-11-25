@@ -6,7 +6,7 @@
 
 Eastwood takes purchased or inbound leads, decides who may lawfully be called and who is worth calling, and has **Imogen**, a realtime AI voice assistant, run the discovery call. She screens health, presents deterministic quotes, and books the prospect with a licensed human agent who closes. Every step is gated in code, not by prompting the model to behave.
 
-> **Status: pre-launch.** The application is built and test-verified (538 tests passing) and was verified end to end against an isolated stack with simulated providers. The remaining go-live work is credentials, registrations, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
+> **Status: pre-launch.** The application is built and test-verified (625 tests passing, plus 6 database integration tests) and was verified end to end — including a 27,000-lead load test — against an isolated stack with simulated providers. The remaining go-live work is credentials, registrations, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
 
 ---
 
@@ -34,6 +34,21 @@ Eastwood takes purchased or inbound leads, decides who may lawfully be called an
 - HTTP ingest API and signature-verified Facebook Lead Ads (`leadgen`) webhook
 - Browser lead uploader (`landing/upload.html`) and a 60-second "risk scan" web funnel (`landing/site/`)
 - Lead batches tied to vendor and cost for ROI tracking
+
+### Bulk lead books
+- CSV and XLSX import built for tens of thousands of rows: streaming readers, automatic column mapping, full state-name normalization, first-valid-of-several phone columns
+- Idempotent (file hash) and resumable (cursor committed with each chunk; a killed import continues where it stopped)
+- One lead per phone number; in-file repeats, existing numbers and previously opted-out numbers are reported, not inserted
+- Owner, source, acquisition date, external id and consent evidence preserved per lead; per-row error report (row number + code, no personal data)
+- Per-channel authorization: consent must be documented, name **your** agency, and cover AI voice (calls) or texts (SMS); anything else — including consent given to another seller — is quarantined with a reason
+- Inventory by state, area code, product, lead age, consent and eligibility, with FTC registry cost and a coverage curve computed from the actual area codes
+
+### Campaigns, budgets, and the calendar
+- Leads are dialed only after an operator enqueues them into an active campaign
+- Per-campaign concurrency and calls-per-minute under global caps; campaign budget ceiling that **halts outbound automatically**; daily spend ceiling
+- Spend ledger (estimated from configurable unit prices) and a per-call attempt log
+- The licensed agent's own part-time calendar: weekly windows, slot length, buffers, daily cap, blackout dates; overbooking is prevented by an advisory lock plus a unique index
+- Operations report: attempts, answered calls, qualified prospects, appointments, opt-outs, conversion rates, cost per appointment
 
 ### Enrichment, scoring, and routing
 - Optional OpenFEC donor and NPPES NPI provider lookups
@@ -91,7 +106,7 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 ### Operator APIs and observability
 - Closer cockpit (`/api/cockpit/queue`, `/api/cockpit/lead/{id}`): a best-first queue with placement and a suggested opener
 - Batch ROI and lead-source ROI computed live, call-outcome tagging, and a dashboard summary
-- 36 Prometheus metrics (27 agent, 9 core), a provisioned Grafana "Eastwood operations" dashboard, `scripts/turn_latency_report.sh`, and call-trace tooling
+- 37 Prometheus metrics (27 agent, 10 core), a provisioned Grafana "Eastwood operations" dashboard, `scripts/turn_latency_report.sh`, and call-trace tooling
 - Twilio answering-machine detection and an abandoned-session reaper
 
 ## What Eastwood does not do
@@ -133,7 +148,7 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 | AI | OpenAI Realtime `gpt-realtime-2` (voice "shimmer"), `gpt-4o-transcribe` with logprobs, tuned server VAD |
 | Data | PostgreSQL 16 (two databases, 11 SQL migrations), Apache Kafka 3.7 (KRaft), Redis 7 |
 | Infrastructure | Docker Compose (9 services), nginx 1.25, Prometheus, Grafana |
-| Testing | pytest (273 tests), `node:test` via tsx (265 tests, including end-to-end call simulations) |
+| Testing | pytest (356 unit + 6 database integration tests), `node:test` via tsx (269 tests, including end-to-end call simulations), a 27,000-lead load test with a simulated telephone provider |
 | Legacy pipeline (`src/`) | kafka-python, psycopg 3, Redis idempotency keys, booking tokens, consent evidence packs |
 
 ## Repository layout
@@ -149,7 +164,7 @@ landing/         Static landing page, lead uploader, and risk-scan funnel (serve
 nginx/           Edge proxy config
 scripts/         DB init, migrations, turn-latency report
 showcase/        The public capabilities site (deployed to Vercel)
-docs/            Go-live checklist; launch dependencies, credentials, and costs
+docs/            Go-live checklist; launch dependencies and costs; import and campaign runbook; capacity and load test
 grafana/         Provisioned Prometheus datasource and operations dashboard
 ```
 
