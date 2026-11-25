@@ -25,6 +25,12 @@
 # here listens publicly on its own.
 
 services:
+  kafka:
+    environment:
+      # Eastwood sends a handful of events per call; the image default fixes the
+      # JVM heap at 1 GB. 512 MB keeps the whole stack under ~1.2 GB of RAM.
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xmx512m -Xms512m}
+
   postgres:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production (openssl rand -hex 24)}
@@ -73,6 +79,11 @@ services:
       MAX_CONCURRENT_CALLS: ${MAX_CONCURRENT_CALLS:-1}
       DIAL_MAX_ATTEMPTS: ${DIAL_MAX_ATTEMPTS:-5}
       OUTBOUND_ENABLED: ${OUTBOUND_ENABLED:-false}
+      # Real provider only; the load-test simulator is refused here and at boot.
+      TELEPHONY_PROVIDER: twilio
+      CONSENT_AUTHORIZED_SELLERS: ${CONSENT_AUTHORIZED_SELLERS:?set CONSENT_AUTHORIZED_SELLERS to your agency name(s) as consent disclosures state them}
+      OUTBOUND_DAILY_SPEND_LIMIT_USD: ${OUTBOUND_DAILY_SPEND_LIMIT_USD:?set OUTBOUND_DAILY_SPEND_LIMIT_USD}
+      ENRICHMENT_ENABLED: "false"
 
   ai-agent:
     ports: !override

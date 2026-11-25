@@ -76,7 +76,10 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
                     await followup_repo.mark_failed(task.id)
                     continue
 
-                eligible, reason = await check_dial_eligibility(session, lead)
+                # Texts need SMS authorization; callbacks are AI-voice calls.
+                eligible, reason = await check_dial_eligibility(
+                    session, lead, channel="ai_voice" if channel == "call" else "sms"
+                )
                 if not eligible:
                     await followup_repo.mark_status(task.id, "blocked")
                     record_contact_decision(metric_channel, "blocked")
@@ -105,6 +108,8 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
                             priority=float(lead.triage_priority or 0.0),
                             scheduled_at=now,
                             max_attempts=settings.dial_max_attempts,
+                            # stays inside the campaign (and budget) that reached them
+                            campaign_id=await dq_repo.last_campaign_for_lead(lead.id),
                         )
                     await followup_repo.mark_sent(task.id)
                     record_contact_decision("callback", "queued")
@@ -128,8 +133,22 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
                     **ctx,
                 }
                 body = render_template(template_key, full_ctx)
+                from domain import spend as _spend
+
+                campaign_id = await DialQueueRepo(session).last_campaign_for_lead(lead.id)
+                sms_cost = _spend.sms_segments(body) * settings.cost_sms_per_segment_usd
+                if not await _spend.sms_within_budget(session, tenant_id=task.tenant_id,
+                                                      campaign_id=campaign_id, cost=sms_cost, now=now):
+                    # Over the daily ceiling or the campaign budget: try again
+                    # tomorrow (a raised budget lets it through).
+                    await followup_repo.reschedule(
+                        task.id, _spend.next_day_start(now, settings.calendly_default_timezone))
+                    record_contact_decision("sms", "budget_deferred")
+                    continue
                 await asyncio.to_thread(sms_client.send, lead.phone_e164, body)
                 await followup_repo.mark_sent(task.id)
+                await _spend.record_sms(session, tenant_id=task.tenant_id, campaign_id=campaign_id,
+                                        body=body, reference=f"followup:{task.id}")
                 record_contact_decision("sms", "sent")
                 logger.info("followup SMS sent lead=%s template=%s", task.lead_id, template_key)
                 processed += 1

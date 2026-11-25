@@ -199,6 +199,8 @@ export interface SessionState {
   quoteFailureReason: string | null;
   /** Real availability retrieved from core before any time was offered. */
   offeredSlots: string[];
+  /** False when the calendar (the agent's own) needs no email to book. Default true (Calendly). */
+  slotsRequireEmail?: boolean;
   /** Calendly booking result for this call, if any. */
   calendly: CalendlyState | null;
   appointmentBooked: boolean;

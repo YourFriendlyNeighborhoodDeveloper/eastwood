@@ -33,6 +33,7 @@ def make_settings(**overrides) -> Settings:
         dnc_san="test-san",
         dnc_area_codes="313,248",
         public_base_url="https://calls.example.com",
+        consent_authorized_sellers="Example Agency",
     )
     kwargs.update(overrides)
     return Settings(**kwargs)

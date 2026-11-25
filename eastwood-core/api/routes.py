@@ -375,7 +375,8 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
 # ── Appointment booking ───────────────────────────────────────────────────────
 
 @router.get("/api/scheduling/availability")
-async def scheduling_availability(timezone: str | None = None, limit: int = 3):
+async def scheduling_availability(timezone: str | None = None, limit: int = 3,
+                                  session: AsyncSession = Depends(get_session)):
     """
     Real upcoming appointment times from the configured scheduling provider
     (Calendly). The voice agent calls this BEFORE offering any time to a
@@ -387,6 +388,12 @@ async def scheduling_availability(timezone: str | None = None, limit: int = 3):
     settings = get_settings()
     provider = _make_scheduling_provider(settings)
     if provider is None:
+        calendar = _local_calendar(settings)
+        if calendar is not None:
+            # The agent's own part-time calendar: real open slots, overbooking-proof.
+            times = await calendar.available_times(session, pinned_tenant_id(), limit=max(limit, 1))
+            return {"calendly_enabled": False, "calendar": "local", "requires_email": False,
+                    "times": times, "timezone": settings.calendly_default_timezone}
         return {"calendly_enabled": False, "times": [], "timezone": settings.calendly_default_timezone}
 
     from domain.scheduling import CalendlyUnavailableError
@@ -463,35 +470,64 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
             logger.warning("calendly booking failed for lead %s: %s", lead_id_str, exc)
             calendly_status = "failed"
 
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        booking_tz = ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        booking_tz = ZoneInfo(settings.calendly_default_timezone)
+        tz_name = settings.calendly_default_timezone
+
     if start_time_iso:
         try:
             starts_at = datetime.fromisoformat(start_time_iso.replace("Z", "+00:00"))
             if starts_at.tzinfo is None:
-                starts_at = starts_at.replace(tzinfo=timezone.utc)
+                starts_at = starts_at.replace(tzinfo=booking_tz)
         except ValueError:
-            starts_at = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            raise HTTPException(status_code=422, detail="start_time must be ISO 8601") from None
     else:
+        # A spoken preference is in the prospect's/agent's local time — never UTC.
         try:
-            starts_at = datetime.fromisoformat(f"{preferred_date}T{preferred_time}").replace(tzinfo=timezone.utc)
+            starts_at = datetime.fromisoformat(f"{preferred_date}T{preferred_time}").replace(tzinfo=booking_tz)
         except ValueError:
-            starts_at = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            raise HTTPException(status_code=422, detail="preferred_date/preferred_time not understood") from None
 
-    ends_at = starts_at + timedelta(hours=1)
+    calendar = _local_calendar(settings) if provider is None else None
+    if calendar is not None and start_time_iso:
+        # Reserve on the agent's own calendar (advisory lock + unique index).
+        from domain.scheduling.local import SlotUnavailableError
+        from sqlalchemy.exc import IntegrityError
 
-    slot = _SlotModel(
-        tenant_id=settings.default_tenant_id,
-        starts_at=starts_at,
-        ends_at=ends_at,
-        available=False,
-    )
-    session.add(slot)
-    await session.flush()
+        try:
+            slot = await calendar.reserve(session, settings.default_tenant_id, starts_at)
+        except SlotUnavailableError as exc:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail={"error": "slot_unavailable", "reason": exc.reason}) from None
+        except IntegrityError:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail={"error": "slot_unavailable", "reason": "slot_taken"}) from None
+        starts_at = slot.starts_at
+    else:
+        # Calendly-confirmed bookings hold the time; a free-form request (no
+        # calendar, or a preference outside offered slots) does not block it.
+        holds_time = calendly_status == "confirmed"
+        slot = _SlotModel(
+            tenant_id=settings.default_tenant_id,
+            starts_at=starts_at.astimezone(timezone.utc),
+            ends_at=starts_at.astimezone(timezone.utc) + timedelta(minutes=settings.appointment_slot_minutes),
+            available=not holds_time,
+        )
+        session.add(slot)
+        await session.flush()
 
     appointment = _ApptModel(
         lead_id=_uuid.UUID(lead_id_str),
         slot_id=slot.id,
         tenant_id=settings.default_tenant_id,
-        status="scheduled" if calendly_status != "failed" else "requested",
+        status=(
+            "scheduled" if (calendar is not None and start_time_iso) or calendly_status == "confirmed"
+            else "requested"
+        ),
         notes=notes,
         prospect_email=prospect_email,
         timezone=tz_name,
@@ -555,9 +591,10 @@ async def create_appointment(request: Request, session: AsyncSession = Depends(g
     return {
         "appointment_id": str(appointment.id),
         "booked_at": starts_at.isoformat(),
-        "date": preferred_date or starts_at.date().isoformat(),
-        "time": preferred_time if not start_time_iso else starts_at.strftime("%H:%M"),
+        "date": starts_at.astimezone(booking_tz).date().isoformat(),
+        "time": starts_at.astimezone(booking_tz).strftime("%H:%M"),
         "timezone": tz_name,
+        "status": appointment.status,
         "calendly_status": calendly_status,
         "calendly_event_uri": calendly_booking.event_uri if calendly_booking else None,
         "calendly_invitee_uri": calendly_booking.invitee_uri if calendly_booking else None,
@@ -573,6 +610,13 @@ def _make_appointment_notifier(settings):
 
     sms = SmsClient() if settings.twilio_account_sid else None
     return AppointmentNotificationService(sms, settings.agent_notification_phone_e164)
+
+
+def _local_calendar(settings):
+    """The agent's own availability calendar, or None when AGENT_AVAILABILITY is unset."""
+    from domain.scheduling.local import LocalCalendar
+
+    return LocalCalendar.from_settings(settings)
 
 
 def _make_scheduling_provider(settings):
@@ -918,6 +962,25 @@ async def twilio_status_callback(
     result = await handle_terminal_status(
         session, session_id, call_status, ai_agent=_get_ai_agent_client()
     )
+
+    # Close the attempt and book its spend (idempotent; separate transaction).
+    from domain.attempts import close_attempt
+    from domain.dialing import TWILIO_STATUS_MAP
+
+    normalized = TWILIO_STATUS_MAP.get(call_status)
+    if normalized:
+        from db.session import session_scope
+
+        try:
+            async with session_scope() as spend_session:
+                closed = await close_attempt(
+                    spend_session, session_id=session_id, status=normalized,
+                    duration_seconds=form.get("CallDuration"), answered_by=form.get("AnsweredBy"),
+                )
+            if closed:
+                result["cost_usd"] = closed["cost_usd"]
+        except Exception:
+            logger.exception("could not close dial attempt for session %s", session_id)
     logger.info("twilio status callback: session=%s status=%s result=%s", session_id, call_status, result)
     return result
 
@@ -1051,3 +1114,165 @@ async def outbound_resume(request: Request, session: AsyncSession = Depends(get_
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await session.commit()
     return state.as_dict()
+
+
+# ── Imports, inventory, campaigns, reporting ──────────────────────────────────
+
+@router.get("/api/imports")
+async def list_imports(session: AsyncSession = Depends(get_session)):
+    from sqlalchemy import select as _select
+    from db.models import ImportBatch
+
+    rows = (await session.execute(
+        _select(ImportBatch).where(ImportBatch.tenant_id == pinned_tenant_id()).order_by(ImportBatch.started_at.desc())
+    )).scalars()
+    return {"imports": [{
+        "batch_id": str(b.id), "file_name": b.file_name, "status": b.status, "source_name": b.source_name,
+        "total_rows": b.total_rows, "inserted": b.inserted, "quarantined": b.quarantined,
+        "authorized_ai_voice": b.authorized_ai_voice, "started_at": b.started_at.isoformat() if b.started_at else None,
+    } for b in rows]}
+
+
+@router.get("/api/imports/{batch_id}")
+async def import_report(batch_id: str):
+    from domain.imports import batch_report
+
+    try:
+        report = await batch_report(batch_id)
+    except ValueError:
+        report = None
+    if report is None:
+        raise HTTPException(status_code=404, detail="import batch not found")
+    return report
+
+
+@router.get("/api/imports/{batch_id}/errors.csv")
+async def import_errors_csv(batch_id: str):
+    from starlette.responses import Response as StarletteResponse
+    from domain.imports import errors_csv
+
+    try:
+        body = await errors_csv(batch_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="import batch not found") from None
+    return StarletteResponse(content=body, media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="import-{batch_id}-errors.csv"'})
+
+
+@router.get("/api/inventory")
+async def inventory(import_batch_id: str | None = None, format: str = "json",
+                    session: AsyncSession = Depends(get_session)):
+    """Inventory by state, area code, product, lead age, consent and eligibility,
+    with FTC registry cost computed from the actual area codes."""
+    from domain.inventory import build_inventory, inventory_markdown
+
+    inv = await build_inventory(session, pinned_tenant_id(), import_batch_id=import_batch_id)
+    if format == "md":
+        from starlette.responses import Response as StarletteResponse
+
+        return StarletteResponse(content=inventory_markdown(inv), media_type="text/markdown")
+    return inv
+
+
+async def _campaign_or_404(session, campaign_id: str):
+    from domain.campaigns import get_campaign
+
+    c = await get_campaign(session, campaign_id, pinned_tenant_id())
+    if c is None:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return c
+
+
+@router.post("/api/campaigns", status_code=201)
+async def create_campaign_route(request: Request, session: AsyncSession = Depends(get_session)):
+    from domain.campaigns import CampaignError, campaign_stats, create_campaign
+
+    try:
+        c = await create_campaign(session, await request.json(), pinned_tenant_id())
+    except CampaignError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    await session.commit()
+    return await campaign_stats(session, c)
+
+
+@router.get("/api/campaigns")
+async def list_campaigns(session: AsyncSession = Depends(get_session)):
+    from sqlalchemy import select as _select
+    from db.models import Campaign
+    from domain.campaigns import campaign_stats
+
+    rows = list((await session.execute(
+        _select(Campaign).where(Campaign.tenant_id == pinned_tenant_id()).order_by(Campaign.created_at.desc())
+    )).scalars())
+    return {"campaigns": [await campaign_stats(session, c) for c in rows]}
+
+
+@router.get("/api/campaigns/{campaign_id}")
+async def get_campaign_route(campaign_id: str, session: AsyncSession = Depends(get_session)):
+    from domain.campaigns import campaign_stats
+
+    return await campaign_stats(session, await _campaign_or_404(session, campaign_id))
+
+
+@router.post("/api/campaigns/{campaign_id}/enqueue")
+async def enqueue_campaign(campaign_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+    """Queue the leads this campaign may call (authorized, DNC-cleared, in scope)."""
+    from domain.campaigns import enqueue_leads
+
+    c = await _campaign_or_404(session, campaign_id)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = await enqueue_leads(session, c, limit=(body or {}).get("limit"))
+    await session.commit()
+    return result
+
+
+@router.post("/api/campaigns/{campaign_id}/status")
+async def campaign_status_route(campaign_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+    from domain.campaigns import CampaignError, campaign_stats, set_status
+
+    c = await _campaign_or_404(session, campaign_id)
+    body = await request.json()
+    try:
+        await set_status(session, c, str(body.get("status", "")), body.get("reason"))
+    except CampaignError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await session.commit()
+    return await campaign_stats(session, c)
+
+
+@router.post("/api/campaigns/{campaign_id}/budget")
+async def campaign_budget_route(campaign_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+    from domain.campaigns import CampaignError, campaign_stats, raise_budget
+
+    c = await _campaign_or_404(session, campaign_id)
+    body = await request.json()
+    try:
+        await raise_budget(session, c, float(body.get("budget_usd", 0)))
+    except (CampaignError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    await session.commit()
+    return await campaign_stats(session, c)
+
+
+@router.get("/api/reports/operations")
+async def operations_report_route(since: str | None = None, until: str | None = None,
+                                  campaign_id: str | None = None, session: AsyncSession = Depends(get_session)):
+    """Attempts, answered calls, qualified prospects, appointments, opt-outs,
+    conversion rates, estimated spend and cost per appointment."""
+    from datetime import datetime as _dt, timezone as _tz
+    from domain.reporting import operations_report
+
+    def parse(v):
+        if not v:
+            return None
+        try:
+            d = _dt.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"bad timestamp {v!r}") from None
+        return d if d.tzinfo else d.replace(tzinfo=_tz.utc)
+
+    return await operations_report(session, tenant_id=pinned_tenant_id(), since=parse(since),
+                                   until=parse(until), campaign_id=campaign_id)

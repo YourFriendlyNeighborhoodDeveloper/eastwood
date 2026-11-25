@@ -154,6 +154,63 @@ class Settings(BaseSettings):
     # formula adapter. Destructive: production refuses to boot with it set.
     reset_rate_table_on_boot: bool = False
 
+    # ── Lead-use and consent authorization (domain.imports.classify) ─────────
+    # Comma-separated names of YOUR agency as a consent disclosure must name it
+    # (e.g. "Eastwood Financial,Eastwood Insurance Agency"). TCPA consent is
+    # seller-specific: consent given to another company does not authorize you.
+    # Empty means no consent can authorize AI-voice calls or marketing SMS.
+    consent_authorized_sellers: str = ""
+    # Consent older than this many days is quarantined (0 = no age limit).
+    consent_max_age_days: int = 0
+
+    # Third-party enrichment (OpenFEC donor / NPPES provider lookups) sends each
+    # lead's name to an external API. Off by default; never used by bulk import.
+    enrichment_enabled: bool = False
+
+    # ── Outbound spend and provider limits (domain.spend) ───────────────────
+    # Global ceiling on estimated outbound spend per calendar day (agent's
+    # timezone). The dialer stops for the day when the next call could exceed it.
+    outbound_daily_spend_limit_usd: float = 25.0
+    # Provider rate limit for call initiations (Twilio's default outbound
+    # rate is about 1 call/second per account).
+    dial_calls_per_minute: int = 30
+    # Unit prices used to estimate spend (USD). Confirm against your invoices.
+    cost_voice_per_min_usd: float = 0.014
+    cost_ai_per_min_usd: float = 0.15
+    cost_transcribe_per_min_usd: float = 0.006
+    cost_sms_per_segment_usd: float = 0.013
+    # Worst-case cost reserved for every call in flight when checking budgets.
+    # The effective reserve is never below what a MAX_CALL_MINUTES call costs
+    # (call_reserve_usd), which is what makes the budget ceilings hard limits.
+    cost_reserve_per_call_usd: float = 1.75
+    # Hard cap on a single call's length, enforced by the provider (Twilio
+    # TimeLimit) — it bounds what one call can cost.
+    max_call_minutes: int = 15
+    # Hold dialing while the agent's own calendar has no open slot in the
+    # horizon: calls that cannot end in an appointment only spend money.
+    pause_dialing_when_calendar_full: bool = True
+
+    # "twilio" (real) or "simulated" — a fake provider for load testing that
+    # never touches a network beyond this stack. Production refuses "simulated".
+    telephony_provider: str = "twilio"
+    # Where the simulated provider delivers its signed status callbacks.
+    simulated_callback_base_url: str = "http://nginx"
+    # Simulated calls finish after this many seconds (wall clock).
+    simulated_call_seconds: float = 2.0
+
+    # ── Licensed agent's own calendar (domain.scheduling.local) ─────────────
+    # Weekly availability in the agent's timezone, e.g.
+    #   "mon-fri 17:00-20:00; sat 09:00-12:00"
+    # Empty disables the local calendar (Calendly or a free-form request is used).
+    agent_availability: str = ""
+    appointment_slot_minutes: int = 30
+    appointment_buffer_minutes: int = 0
+    appointment_max_per_day: int = 4
+    appointment_min_notice_hours: int = 2
+    appointment_horizon_days: int = 14
+    # Comma-separated YYYY-MM-DD dates with no appointments (vacation, etc.).
+    agent_blackout_dates: str = ""
+
     # Autonomous dialer controls
     max_concurrent_calls: int = 3        # hard cap on simultaneous outbound calls
     dial_max_attempts: int = 5           # total attempts per lead before giving up
@@ -175,6 +232,16 @@ class Settings(BaseSettings):
 
     def active_states_list(self) -> list[str]:
         return [s.strip().upper() for s in self.active_states.split(",") if s.strip()]
+
+    def call_reserve_usd(self) -> float:
+        """Budget reserved per call: the cost of a call that runs the full
+        MAX_CALL_MINUTES (voice billed per started minute), or the configured
+        COST_RESERVE_PER_CALL_USD if higher."""
+        per_min = self.cost_voice_per_min_usd + self.cost_ai_per_min_usd + self.cost_transcribe_per_min_usd
+        return round(max(self.cost_reserve_per_call_usd, self.max_call_minutes * per_min), 4)
+
+    def consent_sellers_list(self) -> list[str]:
+        return [s.strip() for s in self.consent_authorized_sellers.split(",") if s.strip()]
 
     def consumed_topics(self) -> list[str]:
         """Every topic eastwood-core subscribes to.
@@ -203,6 +270,13 @@ class Settings(BaseSettings):
     def thresholds_in_range(cls, v: int) -> int:
         if not 0 <= v <= 100:
             raise ValueError("threshold must be 0-100")
+        return v
+
+    @field_validator("max_call_minutes")
+    @classmethod
+    def call_minutes_in_range(cls, v: int) -> int:
+        if not 1 <= v <= 240:
+            raise ValueError("MAX_CALL_MINUTES must be 1-240")
         return v
 
     @field_validator("active_states")
@@ -340,6 +414,25 @@ def assert_production_safety(settings: Settings | None = None) -> None:
     if s.max_concurrent_calls < 1:
         raise UnsafeProductionConfigError(
             "Refusing to start: APP_ENV=production with MAX_CONCURRENT_CALLS < 1."
+        )
+
+    if s.telephony_provider.strip().lower() != "twilio":
+        raise UnsafeProductionConfigError(
+            f"Refusing to start: APP_ENV=production with TELEPHONY_PROVIDER="
+            f"{s.telephony_provider!r}. The simulated provider is for load testing only."
+        )
+
+    if s.outbound_daily_spend_limit_usd <= 0:
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production without a positive "
+            "OUTBOUND_DAILY_SPEND_LIMIT_USD. Outbound spend must be capped."
+        )
+
+    if not s.consent_sellers_list():
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production without CONSENT_AUTHORIZED_SELLERS. "
+            "Name your agency exactly as consent disclosures name it; consent given "
+            "to any other seller does not authorize AI-voice calls or marketing SMS."
         )
 
 

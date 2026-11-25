@@ -145,6 +145,7 @@ interface ActiveSession {
   quoteFailureReason: string | null;
   /** Real availability retrieved before any time was offered. */
   offeredSlots: string[];
+  slotsRequireEmail?: boolean;
   calendly: CalendlyState | null;
   appointmentBooked: boolean;
   /** Captured field values (captureKey → value), source of the handoff profile. */

@@ -68,6 +68,19 @@ class Lead(Base):
     national_dnc_audit: Mapped[dict | None] = mapped_column(JSONB)
     source_batch_id: Mapped[str | None] = mapped_column(String(64), index=True)
     ap_cents: Mapped[int | None] = mapped_column(Integer)  # annual premium in cents when policy written
+    # ── Provenance (bulk import) ─────────────────────────────────────────────
+    # Who the lead belongs to, where it came from and when it was originally
+    # generated — preserved from the source file, never inferred.
+    lead_owner: Mapped[str | None] = mapped_column(String(128))
+    external_id: Mapped[str | None] = mapped_column(String(128))
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    import_batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    # Per-channel authorization from domain.imports.classify:
+    #   {"ai_voice": bool, "sms": bool, "manual_call": bool, "evaluated_at": iso}
+    # The dialer requires ai_voice=true; marketing SMS requires sms=true.
+    contact_authorization: Mapped[dict | None] = mapped_column(JSONB)
+    # Why the lead is not authorized for AI-voice contact (empty when it is).
+    quarantine_reasons: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -290,7 +303,11 @@ class DialQueueEntry(Base):
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     # pending | dialing | no_answer | voicemail | busy | completed | cancelled
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     session_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Provider call id (Twilio CallSid) — lets the reconciler ask the provider
+    # what happened when a status callback never arrived.
+    provider_call_sid: Mapped[str | None] = mapped_column(String(64))
     amd_result: Mapped[str | None] = mapped_column(String(32))
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -376,3 +393,103 @@ class OutboundControlEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
+
+
+class ImportBatch(Base):
+    """One row per imported file. The sha256 makes re-imports idempotent and
+    processed_rows is the resume cursor (committed with each chunk)."""
+    __tablename__ = "import_batches"
+    __table_args__ = (UniqueConstraint("tenant_id", "file_sha256", name="uq_import_batch_file"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_format: Mapped[str] = mapped_column(String(8), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    lead_owner: Mapped[str | None] = mapped_column(String(128))
+    acquisition_date: Mapped[datetime | None] = mapped_column(Date)
+    # Reference to the written authorization to use these leads (assignment,
+    # purchase agreement). NULL quarantines every lead in the batch.
+    use_authorization_ref: Mapped[str | None] = mapped_column(Text)
+    column_map: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="processing")
+    total_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processed_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicates_in_file: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicates_existing: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quarantined: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    authorized_ai_voice: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class ImportRowError(Base):
+    """Per-row import problems. Row number and a code only — never the row's PII."""
+    __tablename__ = "import_errors"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    batch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    severity: Mapped[str] = mapped_column(String(8), nullable=False)  # error | warning
+    code: Mapped[str] = mapped_column(String(48), nullable=False)
+    field: Mapped[str | None] = mapped_column(String(64))
+    detail: Mapped[str | None] = mapped_column(String(256))
+
+
+class Campaign(Base):
+    """A named, budgeted outbound effort. Leads are dialed only after an
+    operator enqueues them into an active campaign."""
+    __tablename__ = "campaigns"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # draft | active | paused | budget_exhausted | completed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
+    budget_usd: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
+    daily_budget_usd: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    max_concurrent_calls: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    calls_per_minute: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    states: Mapped[list | None] = mapped_column(JSONB)
+    product_lines: Mapped[list | None] = mapped_column(JSONB)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    halted_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class DialAttempt(Base):
+    """One row per call actually initiated — the reporting fact table."""
+    __tablename__ = "dial_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    lead_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    dial_queue_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="initiated")
+    answered_by: Mapped[str | None] = mapped_column(String(32))
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SpendEntry(Base):
+    """Estimated outbound spend, line by line. Budgets sum this table."""
+    __tablename__ = "spend_ledger"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)  # voice | ai | transcribe | sms
+    quantity: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
+    unit_cost_usd: Mapped[float] = mapped_column(Numeric(10, 5), nullable=False)
+    amount_usd: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

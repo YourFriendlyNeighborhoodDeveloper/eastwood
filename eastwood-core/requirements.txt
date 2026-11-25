@@ -16,3 +16,4 @@ twilio>=9.1.0
 cryptography>=42.0.0
 orjson>=3.10.0
 python-multipart>=0.0.9
+openpyxl>=3.1.2

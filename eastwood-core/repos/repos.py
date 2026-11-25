@@ -4,13 +4,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import (
     Appointment,
     BookingSlot,
+    Campaign,
+    DialAttempt,
     CallRecord,
     CarrierProfileModel,
     CarrierRateTable,
@@ -88,6 +90,12 @@ class LeadRepo:
                 score_components=components,
                 updated_at=datetime.now(timezone.utc),
             )
+        )
+
+    async def set_authorization(self, lead_id: uuid.UUID, authorization: dict, reasons: list[str]) -> None:
+        await self._s.execute(
+            update(Lead).where(Lead.id == lead_id)
+            .values(contact_authorization=authorization, quarantine_reasons=reasons)
         )
 
     async def update_status(self, lead_id: uuid.UUID, status: str) -> None:
@@ -529,6 +537,7 @@ class DialQueueRepo:
         priority: float,
         scheduled_at: datetime,
         max_attempts: int = 5,
+        campaign_id: uuid.UUID | None = None,
     ) -> DialQueueEntry:
         entry = DialQueueEntry(
             lead_id=lead_id,
@@ -536,10 +545,18 @@ class DialQueueRepo:
             priority=priority,
             scheduled_at=scheduled_at,
             max_attempts=max_attempts,
+            campaign_id=campaign_id,
         )
         self._s.add(entry)
         await self._s.flush()
         return entry
+
+    async def last_campaign_for_lead(self, lead_id: uuid.UUID) -> uuid.UUID | None:
+        result = await self._s.execute(
+            select(DialQueueEntry.campaign_id).where(DialQueueEntry.lead_id == lead_id)
+            .order_by(DialQueueEntry.created_at.desc()).limit(1)
+        )
+        return result.scalars().first()
 
     async def has_open_entry(self, lead_id: uuid.UUID) -> bool:
         """True if the lead already has a pending or in-flight dial attempt."""
@@ -558,11 +575,29 @@ class DialQueueRepo:
             .where(
                 DialQueueEntry.status == "pending",
                 DialQueueEntry.scheduled_at <= now,
+                # Entries of paused / draft / exhausted campaigns are never read,
+                # so they cannot crowd active work out of the batch.
+                or_(
+                    DialQueueEntry.campaign_id.is_(None),
+                    DialQueueEntry.campaign_id.in_(
+                        select(Campaign.id).where(Campaign.status == "active")
+                    ),
+                ),
             )
             .order_by(DialQueueEntry.priority.desc(), DialQueueEntry.scheduled_at)
             .limit(limit)
         )
         return list(result.scalars())
+
+    async def count_active_by_campaign(self) -> dict:
+        """In-flight calls keyed by campaign id (None for calls outside a campaign)."""
+        from sqlalchemy import func as sqlfunc
+        rows = await self._s.execute(
+            select(DialQueueEntry.campaign_id, sqlfunc.count(DialQueueEntry.id))
+            .where(DialQueueEntry.status == "dialing")
+            .group_by(DialQueueEntry.campaign_id)
+        )
+        return {cid: n for cid, n in rows.all()}
 
     async def count_active(self) -> int:
         from sqlalchemy import func as sqlfunc
@@ -628,6 +663,13 @@ class DialQueueRepo:
             .where(DialQueueEntry.id == entry_id)
             .values(session_id=session_id, updated_at=datetime.now(timezone.utc))
         )
+        # The open attempt for this entry carries the same session id, so the
+        # Twilio status callback can close it.
+        await self._s.execute(
+            update(DialAttempt)
+            .where(DialAttempt.dial_queue_id == entry_id, DialAttempt.ended_at.is_(None))
+            .values(session_id=session_id)
+        )
 
     async def mark_terminal(self, entry_id: uuid.UUID, status: str) -> None:
         """Mark a dial_queue entry at a terminal status, freeing the concurrency slot."""
@@ -665,6 +707,11 @@ class DialQueueRepo:
             )
         )
         return (result.rowcount or 0) > 0
+
+    async def set_call_sid(self, entry_id: uuid.UUID, call_sid: str) -> None:
+        await self._s.execute(
+            update(DialQueueEntry).where(DialQueueEntry.id == entry_id).values(provider_call_sid=call_sid[:64])
+        )
 
     async def reap_stuck_dialing(self, older_than_minutes: int = 10) -> int:
         from datetime import timedelta

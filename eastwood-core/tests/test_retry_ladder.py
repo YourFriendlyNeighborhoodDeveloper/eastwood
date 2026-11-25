@@ -41,6 +41,7 @@ class _Lead:
         self.state = "MI"
         self.national_dnc_status = national_dnc_status
         self.status = status
+        self.contact_authorization = {"ai_voice": True, "sms": True}
         self._suppressed = suppressed
 
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from clients.ai_agent import AiAgentClient
-from clients.twilio_sms import SmsClient
+from clients.telephony import make_telephony_client
+from sqlalchemy import select
 from config.settings import get_settings
 from db.session import session_scope
 from domain.compliance import BLOCKED, UNKNOWN, get_scrub_provider, is_dialable, scrub_number
@@ -30,6 +32,30 @@ logger = logging.getLogger(__name__)
 # yet clear/exempt (e.g. no registry dataset covers it). Not dialable; re-score
 # the lead after a registry refresh to queue it.
 AWAITING_DNC_CLEARANCE = "awaiting_dnc_clearance"
+
+
+class SlidingWindowRate:
+    """Calls started in the last 60 s, per key (None = global). In-process: after
+    a restart the window is empty, which permits at most one minute's quota."""
+
+    def __init__(self) -> None:
+        from collections import deque
+
+        self._deque = deque
+        self._events: dict = {}
+
+    def _window(self, key, now: datetime):
+        q = self._events.setdefault(key, self._deque())
+        cutoff = now - timedelta(seconds=60)
+        while q and q[0] < cutoff:
+            q.popleft()
+        return q
+
+    def allow(self, key, per_minute: int, now: datetime) -> bool:
+        return len(self._window(key, now)) < max(per_minute, 0)
+
+    def record(self, key, now: datetime) -> None:
+        self._window(key, now).append(now)
 
 
 def mask_phone(phone: str | None) -> str:
@@ -76,11 +102,15 @@ class WorkersBrain:
     def __init__(self) -> None:
         self._settings = get_settings()
         self._ai_agent = AiAgentClient()
-        self._sms = SmsClient() if self._settings.twilio_account_sid else None
+        # Twilio, the load-test simulator (TELEPHONY_PROVIDER=simulated), or None.
+        self._sms = make_telephony_client(self._settings)
         self._dnc_scrub = get_scrub_provider(self._settings)
         # Last outbound-gate reason logged by the dial loop, so a halted or
         # disarmed campaign logs once per state change, not every 3 seconds.
         self._last_outbound_reason: str | None = None
+        self._last_hold: str | None = None
+        self._rate = SlidingWindowRate()
+        self._pending_dials: list = []
         # One outcome SMS to Ryan per connected call. Destination comes from
         # settings — never hardcoded into handlers.
         from domain.notifications import CallOutcomeNotificationService
@@ -153,6 +183,30 @@ class WorkersBrain:
 
             lead = await lead_repo.upsert_raw(tenant_id, normalized)
             leads_ingested.labels(tenant_id=tenant_id, source=msg.get("source", "unknown")).inc()
+
+            # Per-channel authorization, exactly as bulk import classifies it.
+            # API/first-party leads count as authorized for use; consent must
+            # still be documented (text + timestamp + source) and name this
+            # agency. No timestamp is ever invented.
+            from domain.imports.classify import ConsentEvidence, classify
+            from domain.imports.mapping import parse_datetime, phone_region_of
+            from domain.tcpa import supported_states
+
+            consent_text = msg.get("consent_text") or msg.get("tcpa_consent") or msg.get("disclosure")
+            evidence = ConsentEvidence(
+                text=consent_text,
+                captured_at=parse_datetime(msg.get("consent_timestamp") or msg.get("consent_ts")),
+                url=msg.get("consent_source_url") or msg.get("form_url"),
+                certificate=msg.get("consent_certificate") or msg.get("trusted_form_cert_url"),
+                source=msg.get("consent_source"),
+            ) if consent_text else None
+            auth = classify(
+                use_authorized=True, consent=evidence, sellers=self._settings.consent_sellers_list(),
+                state=normalized.get("state"), supported_states=supported_states(),
+                max_age_days=self._settings.consent_max_age_days,
+                phone_region=phone_region_of(normalized["phone_e164"]),
+            )
+            await lead_repo.set_authorization(lead.id, auth.as_json(datetime.now(timezone.utc)), auth.reasons)
 
             # Create consent record when the import includes express written consent.
             # This covers CSV imports via --assume-consent-source and any vendor payload
@@ -683,6 +737,12 @@ class WorkersBrain:
                     await lead_repo.update_status(lead.id, AWAITING_DNC_CLEARANCE)
                 return
 
+            auth = (getattr(fresh, "contact_authorization", None) if fresh else None) or {}
+            if not auth.get("ai_voice"):
+                logger.warning("refusing to queue lead %s: not authorized for AI-voice calls", lead.id)
+                await lead_repo.update_status(lead.id, "quarantined")
+                return
+
             dq_repo = DialQueueRepo(session)
             entry = await dq_repo.enqueue(
                 lead_id=lead.id,
@@ -694,9 +754,24 @@ class WorkersBrain:
             logger.info("lead %s enqueued for dialing (entry=%s priority=%.3f)", lead.id, entry.id, priority)
 
     async def process_dial_queue(self) -> int:
-        """Drain due dial-queue entries respecting TCPA windows and the concurrency cap.
-        Returns the number of calls initiated. Called by the background worker loop."""
+        """Drain due dial-queue entries. Returns the number of calls initiated.
+
+        Gates, in order, each fail-closed:
+          campaign gate  outbound armed + authorized, else nothing (domain.outbound)
+          concurrency    MAX_CONCURRENT_CALLS globally, max_concurrent_calls per campaign
+          campaign       only entries with no campaign or an ACTIVE campaign are read
+          rate limit     DIAL_CALLS_PER_MINUTE globally, calls_per_minute per campaign
+          eligibility    DNC, suppression, lead status, AI-voice authorization
+          TCPA window    outside 8am-9pm local → rescheduled, not dialed
+          calendar       the agent's calendar has an open slot (if configured)
+          budget         daily ceiling and campaign ceiling (domain.spend); a spent
+                         campaign budget HALTS outbound and marks the campaign
+        Called by the background worker loop every 3 seconds.
+        """
+        from domain.outbound import halt_outbound
+        from domain.spend import check_budget
         from domain.tcpa import in_tcpa_window, next_tcpa_window_open
+        from db.models import Campaign, DialAttempt
 
         now = datetime.now(timezone.utc)
         calls_fired = 0
@@ -716,28 +791,61 @@ class WorkersBrain:
             dq_repo = DialQueueRepo(session)
             lead_repo = LeadRepo(session)
 
-            active = await dq_repo.count_active()
+            active_by_campaign = await dq_repo.count_active_by_campaign()
+            active = sum(active_by_campaign.values())
             slots = self._settings.max_concurrent_calls - active
             if slots <= 0:
                 return 0
 
-            entries = await dq_repo.get_due(now=now, limit=slots * 3)
+            # No open appointment slot on the agent's calendar → every call
+            # could only end in "call me back"; hold instead of spending.
+            if self._settings.pause_dialing_when_calendar_full:
+                from domain.scheduling.local import LocalCalendar
+
+                calendar = LocalCalendar.from_settings(self._settings)
+                if calendar is not None and not await calendar.available_times(
+                    session, self._settings.default_tenant_id, now=now, limit=1
+                ):
+                    self._note_hold("calendar_full", "no open appointment slot in the horizon")
+                    record_contact_decision("dial", "calendar_full")
+                    return 0
+
+            entries = await dq_repo.get_due(now=now, limit=max(slots * 3, 30))
+            campaign_ids = {getattr(e, "campaign_id", None) for e in entries} - {None}
+            campaigns = {
+                c.id: c for c in (await session.execute(
+                    select(Campaign).where(Campaign.id.in_(campaign_ids))
+                )).scalars()
+            } if campaign_ids else {}
 
             for entry in entries:
                 if calls_fired >= slots:
                     break
+                entry_campaign = getattr(entry, "campaign_id", None)
+                campaign = campaigns.get(entry_campaign) if entry_campaign else None
+                if entry_campaign and (campaign is None or campaign.status != "active"):
+                    continue
+                if campaign and active_by_campaign.get(campaign.id, 0) >= campaign.max_concurrent_calls:
+                    continue
+                if not self._rate.allow(None, self._settings.dial_calls_per_minute, now):
+                    self._note_hold("rate_limited", "DIAL_CALLS_PER_MINUTE")
+                    break
+                if campaign and not self._rate.allow(campaign.id, campaign.calls_per_minute, now):
+                    self._note_hold("rate_limited", f"campaign {campaign.name}")
+                    continue
+
                 lead = await lead_repo.get_by_id(entry.lead_id)
                 if not lead:
                     await dq_repo.mark_completed(entry.id)
                     continue
 
                 # Last gate before the dial — re-checks every hard eligibility rule
-                # (national DNC, entity suppression, terminal lead status), so a
-                # scheduled retry that became ineligible in the meantime is dropped
-                # before Twilio is ever called.
+                # (national DNC, entity suppression, terminal lead status, AI-voice
+                # authorization), so a scheduled retry that became ineligible in the
+                # meantime is dropped before Twilio is ever called.
                 eligible, reason = await check_dial_eligibility(session, lead)
                 if not eligible:
-                    term = "compliance_blocked" if reason.startswith("national_dnc") else "ineligible"
+                    term = "compliance_blocked" if reason.startswith(("national_dnc", "not_authorized")) else "ineligible"
                     await dq_repo.mark_terminal(entry.id, term)
                     logger.warning("dial refused for lead %s: %s", lead.id, reason)
                     continue
@@ -748,16 +856,52 @@ class WorkersBrain:
                     logger.debug("lead %s outside TCPA window, rescheduled to %s", lead.id, next_open)
                     continue
 
+                budget = await check_budget(
+                    session, tenant_id=entry.tenant_id, campaign=campaign, in_flight_total=active,
+                    in_flight_campaign=active_by_campaign.get(campaign.id, 0) if campaign else 0, now=now,
+                )
+                if budget.verdict == "campaign_exhausted":
+                    campaign.status = "budget_exhausted"
+                    campaign.halted_reason = f"budget ceiling reached: {budget.detail}"
+                    await halt_outbound(session, operator="budget-guard",
+                                        reason=f"campaign '{campaign.name}' {budget.detail}")
+                    record_contact_decision("dial", "budget_halt")
+                    logger.warning("BUDGET CEILING: campaign %s halted (%s)", campaign.id, budget.detail)
+                    break
+                if budget.verdict != "ok":
+                    self._note_hold(budget.verdict, budget.detail)
+                    record_contact_decision("dial", f"budget_{budget.verdict}")
+                    if campaign is None or budget.verdict == "daily_exhausted":
+                        break
+                    continue
+
                 # Mark dialing with a placeholder; session_id filled in after session creation
                 await dq_repo.mark_dialing(entry.id, session_id=f"pending_{entry.id}")
+                session.add(DialAttempt(
+                    tenant_id=entry.tenant_id, campaign_id=entry_campaign, lead_id=lead.id,
+                    dial_queue_id=entry.id, session_id=f"pending_{entry.id}", status="initiated",
+                ))
+                self._rate.record(None, now)
+                if campaign:
+                    self._rate.record(campaign.id, now)
+                    active_by_campaign[campaign.id] = active_by_campaign.get(campaign.id, 0) + 1
+                active += 1
                 record_contact_decision("dial", "sent")
                 calls_fired += 1
-                # Fire in background so the session lock doesn't block the loop
-                asyncio.create_task(
-                    self._initiate_call(lead, entry.tenant_id, dial_queue_entry_id=entry.id)
-                )
+                # Fire after commit so the dialing row and attempt are durable first
+                self._pending_dials.append((lead, entry.tenant_id, entry.id))
 
+        pending, self._pending_dials = self._pending_dials, []
+        for lead, tenant_id, entry_id in pending:
+            asyncio.create_task(self._initiate_call(lead, tenant_id, dial_queue_entry_id=entry_id))
+        if calls_fired:
+            self._last_hold = None
         return calls_fired
+
+    def _note_hold(self, verdict: str, detail: str = "") -> None:
+        if verdict != self._last_hold:
+            logger.warning("dialer holding: %s %s", verdict, detail)
+            self._last_hold = verdict
 
     async def on_amd_result(self, session_id: str, answered_by: str, call_sid: str) -> None:
         """Handle Twilio AMD callback. Called from the AMD webhook route."""
@@ -918,12 +1062,15 @@ class WorkersBrain:
             if public_base and self._sms and session_id:
                 twiml_url = f"{public_base}/twiml/call/{session_id}"
                 status_callback_url = f"{public_base}/twilio/status/{session_id}"
-                await asyncio.to_thread(
-                    self._sms.make_call,
-                    lead.phone_e164,
-                    twiml_url,
-                    status_callback_url,
+                call_sid = await asyncio.to_thread(
+                    functools.partial(
+                        self._sms.make_call, lead.phone_e164, twiml_url, status_callback_url,
+                        time_limit=self._settings.max_call_minutes * 60,
+                    )
                 )
+                if dial_queue_entry_id and call_sid:
+                    async with session_scope() as _sid_session:
+                        await DialQueueRepo(_sid_session).set_call_sid(dial_queue_entry_id, str(call_sid))
                 logger.info(
                     "outbound call queued lead=%s session=%s to=%s",
                     lead.id, session_id, mask_phone(lead.phone_e164),

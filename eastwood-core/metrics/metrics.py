@@ -55,3 +55,10 @@ outbound_contact_decisions_total = Counter(
     "Prospect-facing contact attempts by channel and gate outcome",
     ["channel", "result"],
 )
+
+# Estimated outbound spend booked to the ledger (domain.spend), by kind.
+spend_usd_total = Counter(
+    "eastwood_spend_usd_total",
+    "Estimated outbound spend booked to the spend ledger, USD",
+    ["kind"],
+)

@@ -84,6 +84,22 @@ async def lifespan(app: FastAPI):
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendly_reschedule_url TEXT",
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS calendly_status VARCHAR(32) NOT NULL DEFAULT 'not_requested'",
             "ALTER TABLE carrier_rate_tables ADD COLUMN IF NOT EXISTS source VARCHAR(128)",
+            # Lead provenance and per-channel authorization (bulk import)
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_owner VARCHAR(128)",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS external_id VARCHAR(128)",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS acquired_at TIMESTAMPTZ",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS import_batch_id UUID",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_authorization JSONB",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS quarantine_reasons JSONB",
+            "CREATE INDEX IF NOT EXISTS ix_leads_import_batch_id ON leads(import_batch_id)",
+            "CREATE INDEX IF NOT EXISTS ix_leads_tenant_phone ON leads(tenant_id, phone_e164)",
+            "CREATE INDEX IF NOT EXISTS ix_leads_status ON leads(status)",
+            # Campaigns on the dial queue; the dialer's hot query
+            "ALTER TABLE dial_queue ADD COLUMN IF NOT EXISTS campaign_id UUID",
+            "ALTER TABLE dial_queue ADD COLUMN IF NOT EXISTS provider_call_sid VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_dial_queue_campaign_id ON dial_queue(campaign_id)",
+            "CREATE INDEX IF NOT EXISTS ix_dial_queue_due ON dial_queue(status, scheduled_at, priority DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_suppressions_tenant_phone ON suppressions(tenant_id, phone_e164)",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS ai_summary TEXT",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS health_flags JSONB",
             "ALTER TABLE call_records ADD COLUMN IF NOT EXISTS carrier_placed VARCHAR(128)",
@@ -95,6 +111,24 @@ async def lifespan(app: FastAPI):
             "CREATE INDEX IF NOT EXISTS ix_lead_field_events_lead_id ON lead_field_events(lead_id)",
         ]:
             await conn.execute(text(sql))
+    # No double-booking: one reserved slot per start time per tenant. Guarded,
+    # because a database written by the old booking path may already hold
+    # duplicate reservations, and a failed CREATE UNIQUE INDEX must not stop boot.
+    async with _get_engine().begin() as conn:
+        dupes = (await conn.execute(text(
+            "SELECT count(*) FROM (SELECT 1 FROM booking_slots WHERE available = false "
+            "GROUP BY tenant_id, starts_at HAVING count(*) > 1) d"
+        ))).scalar_one()
+        if dupes:
+            logger.error(
+                "booking_slots holds %d double-booked start times; the no-overbooking "
+                "unique index was NOT created. Resolve them, then restart.", dupes,
+            )
+        else:
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_booking_slots_reserved "
+                "ON booking_slots(tenant_id, starts_at) WHERE available = false"
+            ))
     logger.info("database schema verified")
 
     # Seed v0.1 ruleset if the rulesets table is empty
@@ -278,6 +312,14 @@ async def lifespan(app: FastAPI):
                     n = await DialQueueRepo(_rs).reap_stuck_dialing(older_than_minutes=10)
                     if n:
                         logger.warning("reaped %d stuck dial_queue entries", n)
+                    from domain.dialing.reconcile import reconcile_stuck_calls
+                    rec = await reconcile_stuck_calls(brain)
+                    if rec.get("reconciled"):
+                        logger.warning("reconciled %d calls whose status callback never arrived", rec["reconciled"])
+                    from domain.attempts import reap_open_attempts
+                    m = await reap_open_attempts(_rs, older_than_minutes=15)
+                    if m:
+                        logger.warning("closed %d dial attempts with no terminal callback", m)
             except Exception:
                 logger.exception("reaper error")
             await _asyncio.sleep(60)

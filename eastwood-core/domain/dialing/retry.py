@@ -36,13 +36,18 @@ RETRYABLE_STATUSES = frozenset({"no_answer", "busy", "failed"})
 # Lead statuses that are terminal for dialing — never retry or dial these.
 NON_DIALABLE_LEAD_STATUSES = frozenset({
     "suppressed", "compliance_blocked", "dead", "converted",
-    "do_not_call", "appointment_set", "booked",
+    "do_not_call", "appointment_set", "booked", "quarantined",
 })
 
 
-async def check_dial_eligibility(session, lead) -> tuple[bool, str]:
-    """Every hard gate a lead must pass to be dialed. Shared by retry scheduling
-    (Twilio callback) and retry execution (process_dial_queue), so both agree.
+async def check_dial_eligibility(session, lead, channel: str = "ai_voice") -> tuple[bool, str]:
+    """Every hard gate a lead must pass to be contacted. Shared by retry
+    scheduling (Twilio callback), retry execution (process_dial_queue) and the
+    follow-up worker, so all agree.
+
+    ``channel`` is the authorization the contact needs: "ai_voice" for calls
+    (Imogen is an artificial voice under the TCPA), "sms" for marketing texts.
+    A lead without that authorization (domain.imports.classify) is refused.
 
     Returns (eligible, reason). TCPA windowing is handled separately by the
     dialer — it reschedules rather than refuses.
@@ -57,6 +62,10 @@ async def check_dial_eligibility(session, lead) -> tuple[bool, str]:
     lead_status = getattr(lead, "status", "") or ""
     if lead_status in NON_DIALABLE_LEAD_STATUSES:
         return False, f"lead_status:{lead_status}"
+
+    auth = getattr(lead, "contact_authorization", None) or {}
+    if not auth.get(channel):
+        return False, f"not_authorized:{channel}"
 
     tenant_id = getattr(lead, "tenant_id", None) or "default"
     if await SuppressionRepo(session).is_suppressed(tenant_id, lead.phone_e164):

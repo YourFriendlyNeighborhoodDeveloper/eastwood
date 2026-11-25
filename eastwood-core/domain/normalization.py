@@ -82,6 +82,12 @@ def normalize_lead_payload(payload: dict) -> dict:
     if age := payload.get("age"):
         normalized["age"] = coerce_age(age)
 
+    # "Michigan", "mi", "Mich." → "MI"; unrecognized → None (never a 2-letter guess).
+    if "state" in payload:
+        from domain.imports.states import normalize_state
+
+        normalized["state"] = normalize_state(payload.get("state"))
+
     # Honour an explicit boolean flag first; fall back to text-pattern matching.
     consent_text = payload.get("consent_text") or payload.get("tcpa_consent") or ""
     normalized["express_written_consent"] = (

@@ -40,11 +40,17 @@ class _Lead:
         self.phone_e164 = PHONE
         self.state = "MI"
         self.national_dnc_status = national_dnc_status
+        self.contact_authorization = {"ai_voice": True, "sms": True}
 
 
 @asynccontextmanager
 async def _fake_session_scope():
-    yield object()
+    yield _FakeSession()
+
+
+class _FakeSession:
+    def add(self, obj):
+        pass
 
 
 # ── The status vocabulary ─────────────────────────────────────────────────────
@@ -265,6 +271,9 @@ class _DialLoopQueueRepo(_FakeDialQueueRepo):
     async def count_active(self):
         return 0
 
+    async def count_active_by_campaign(self):
+        return {}
+
     async def get_due(self, now, limit=10):
         return _DialLoopQueueRepo.due
 
@@ -297,6 +306,12 @@ async def _drain_dial_queue(
     async def _gate(session, tenant_id=None):
         return outbound
     monkeypatch.setattr(brain, "outbound_permitted", _gate)
+    import domain.spend as spend_mod
+    from domain.spend import BudgetDecision
+
+    async def _budget_ok(*a, **k):
+        return BudgetDecision("ok")
+    monkeypatch.setattr(spend_mod, "check_budget", _budget_ok)
     monkeypatch.setattr(tcpa_mod, "in_tcpa_window", lambda *a, **k: True)
     # process_dial_queue now re-checks entity suppression via SuppressionRepo.
     import repos.repos as repos_mod
@@ -431,3 +446,24 @@ async def test_a_failing_provider_resolves_to_unknown_and_writes_nothing(monkeyp
     assert status == UNKNOWN
     assert not is_dialable(status)
     assert _FakeLeadRepo.dnc_writes == []
+
+
+
+@pytest.mark.parametrize("open_slots, expect_dials", [([], 0), (["2026-12-01T17:00:00-05:00"], 1)])
+async def test_dial_loop_holds_while_the_agents_calendar_is_full(monkeypatch, open_slots, expect_dials):
+    """No open appointment slot → every call could only end in 'call me back';
+    the dialer holds instead of spending, and entries stay pending."""
+    import config.settings as cs
+    from domain.scheduling.local import LocalCalendar
+
+    monkeypatch.setattr(cs, "_settings", cs.get_settings().model_copy(
+        update={"agent_availability": "mon-fri 17:00-20:00", "pause_dialing_when_calendar_full": True}))
+
+    async def _avail(self, session, tenant_id, *, now=None, limit=None):
+        return open_slots
+    monkeypatch.setattr(LocalCalendar, "available_times", _avail)
+
+    fired, dialed = await _drain_dial_queue(monkeypatch, CLEAR)
+    assert fired == expect_dials and len(dialed) == expect_dials
+    if not expect_dials:
+        assert _DialLoopQueueRepo.terminal == [] and _DialLoopQueueRepo.dialing == []

@@ -19,8 +19,11 @@ class SmsClient:
         )
         return message.sid
 
-    def make_call(self, to: str, twiml_url: str, status_callback_url: str | None = None) -> str:
+    def make_call(self, to: str, twiml_url: str, status_callback_url: str | None = None,
+                  time_limit: int | None = None) -> str:
         kwargs: dict = dict(to=to, from_=self._from_number, url=twiml_url)
+        if time_limit:
+            kwargs["time_limit"] = int(time_limit)  # Twilio ends the call after this many seconds
         if status_callback_url:
             kwargs["status_callback"] = status_callback_url
             kwargs["status_callback_event"] = ["completed", "no-answer", "busy", "failed", "canceled"]
@@ -41,3 +44,9 @@ class SmsClient:
             async_amd_status_callback_method="POST",
         )
         return call.sid
+
+    def fetch_call(self, call_sid: str) -> dict:
+        """Current provider-side state of a call (Twilio Calls API)."""
+        call = self._client.calls(call_sid).fetch()
+        return {"status": call.status, "duration": call.duration,
+                "answered_by": getattr(call, "answered_by", None)}

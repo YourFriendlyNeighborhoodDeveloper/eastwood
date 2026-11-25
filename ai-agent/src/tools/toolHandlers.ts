@@ -438,11 +438,16 @@ export const toolHandlers: Record<string, ToolHandler> = {
       if (!resp.ok) throw new Error(`availability API ${resp.status}`);
       const data = (await resp.json()) as {
         calendly_enabled?: boolean;
+        calendar?: string;
+        requires_email?: boolean;
         times?: string[];
         timezone?: string;
       };
       const times = (data.times ?? []).slice(0, 3);
       session.offeredSlots = times;
+      // The agent's own calendar books without an email; Calendly needs one
+      // for the invitation. Anything not explicitly false keeps requiring it.
+      session.slotsRequireEmail = data.requires_email !== false;
       toolInvocations.inc({ tool_name: "get_booking_slots", outcome: "success" });
       if (times.length === 0) {
         return {
@@ -458,9 +463,11 @@ export const toolHandlers: Record<string, ToolHandler> = {
         calendlyEnabled: true,
         times,
         timezone: data.timezone,
-        note:
-          "Offer two or three of these exact times and let the prospect pick. " +
-          "Before booking, collect their email address for the calendar invitation.",
+        note: session.slotsRequireEmail
+          ? "Offer two or three of these exact times and let the prospect pick. " +
+            "Before booking, collect their email address for the calendar invitation."
+          : "Offer two or three of these exact times and let the prospect pick, " +
+            "then book the chosen time. No email is needed.",
       };
     } catch (err) {
       logger.warn({ err, sessionId }, "get_booking_slots failed");
@@ -524,9 +531,9 @@ export const toolHandlers: Record<string, ToolHandler> = {
         };
       }
       // The calendar invitation needs the prospect's email — collect it before
-      // booking, never invent one.
+      // booking, never invent one. The agent's own calendar does not.
       const email = parsed.email?.trim() || String(session.captured[CAPTURE.prospectEmail] ?? "").trim();
-      if (!email) {
+      if (!email && session.slotsRequireEmail !== false) {
         toolInvocations.inc({ tool_name: "book_appointment", outcome: "needs_email" });
         return {
           booked: false,
@@ -537,7 +544,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
             "then book again.",
         };
       }
-      session.captured[CAPTURE.prospectEmail] = email;
+      if (email) session.captured[CAPTURE.prospectEmail] = email;
     }
 
     // Assemble the handoff profile from captured facts before we write, so a
@@ -572,6 +579,19 @@ export const toolHandlers: Record<string, ToolHandler> = {
           prospect_profile: profile,
         }),
       });
+      if (resp.status === 409) {
+        // Someone else just took that slot (or the day filled up). Never
+        // pretend it is booked; fetch fresh availability and offer again.
+        session.offeredSlots = [];
+        toolInvocations.inc({ tool_name: "book_appointment", outcome: "slot_taken" });
+        return {
+          booked: false,
+          slotTaken: true,
+          error:
+            "That time was just taken. Call get_booking_slots again and offer the " +
+            "prospect the fresh times.",
+        };
+      }
       if (!resp.ok) throw new Error(`appointments API ${resp.status}`);
       data = (await resp.json()) as Record<string, unknown>;
     } catch (err) {

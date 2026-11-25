@@ -147,10 +147,40 @@ services:
       FACEBOOK_VERIFY_TOKEN: ${FACEBOOK_VERIFY_TOKEN:-}
       CALENDLY_ENABLED: ${CALENDLY_ENABLED:-false}
       CALENDLY_ACCESS_TOKEN: ${CALENDLY_ACCESS_TOKEN:-}
+      CALENDLY_DEFAULT_TIMEZONE: ${CALENDLY_DEFAULT_TIMEZONE:-America/Detroit}
+      # Consent authorization: your agency as consent disclosures name it.
+      CONSENT_AUTHORIZED_SELLERS: ${CONSENT_AUTHORIZED_SELLERS:-}
+      CONSENT_MAX_AGE_DAYS: ${CONSENT_MAX_AGE_DAYS:-0}
+      ENRICHMENT_ENABLED: ${ENRICHMENT_ENABLED:-false}
+      # Spend ceilings, provider rate limit and unit prices (domain/spend.py).
+      OUTBOUND_DAILY_SPEND_LIMIT_USD: ${OUTBOUND_DAILY_SPEND_LIMIT_USD:-25}
+      DIAL_CALLS_PER_MINUTE: ${DIAL_CALLS_PER_MINUTE:-30}
+      COST_VOICE_PER_MIN_USD: ${COST_VOICE_PER_MIN_USD:-0.014}
+      COST_AI_PER_MIN_USD: ${COST_AI_PER_MIN_USD:-0.15}
+      COST_TRANSCRIBE_PER_MIN_USD: ${COST_TRANSCRIBE_PER_MIN_USD:-0.006}
+      COST_SMS_PER_SEGMENT_USD: ${COST_SMS_PER_SEGMENT_USD:-0.013}
+      COST_RESERVE_PER_CALL_USD: ${COST_RESERVE_PER_CALL_USD:-1.75}
+      # Provider-enforced cap on one call's length; bounds one call's cost.
+      MAX_CALL_MINUTES: ${MAX_CALL_MINUTES:-15}
+      PAUSE_DIALING_WHEN_CALENDAR_FULL: ${PAUSE_DIALING_WHEN_CALENDAR_FULL:-true}
+      # twilio | simulated (load testing only; production refuses it)
+      TELEPHONY_PROVIDER: ${TELEPHONY_PROVIDER:-twilio}
+      SIMULATED_CALL_SECONDS: ${SIMULATED_CALL_SECONDS:-2.0}
+      # The licensed agent's own part-time calendar (domain/scheduling/local.py).
+      AGENT_AVAILABILITY: ${AGENT_AVAILABILITY:-}
+      APPOINTMENT_SLOT_MINUTES: ${APPOINTMENT_SLOT_MINUTES:-30}
+      APPOINTMENT_BUFFER_MINUTES: ${APPOINTMENT_BUFFER_MINUTES:-0}
+      APPOINTMENT_MAX_PER_DAY: ${APPOINTMENT_MAX_PER_DAY:-4}
+      APPOINTMENT_MIN_NOTICE_HOURS: ${APPOINTMENT_MIN_NOTICE_HOURS:-2}
+      APPOINTMENT_HORIZON_DAYS: ${APPOINTMENT_HORIZON_DAYS:-14}
+      AGENT_BLACKOUT_DATES: ${AGENT_BLACKOUT_DATES:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       # Downloaded DNC registry data must survive container rebuilds; the
       # image itself never contains data/private (.dockerignore).
       - dncdata:/app/data/private
+      # Lead files to import (scripts/leads.py). Gitignored; read-only.
+      - ./data/private/imports:/app/imports:ro
 
 
   ai-agent:

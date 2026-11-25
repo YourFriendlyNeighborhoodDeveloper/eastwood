@@ -163,6 +163,7 @@ def test_boot_guard_allows_production_with_an_empty_allowlist():
         dnc_san="test-san",
         dnc_area_codes="313,248",
         public_base_url="https://calls.example.com",
+        consent_authorized_sellers="Example Agency",
     ))
 
 

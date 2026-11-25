@@ -65,6 +65,20 @@ def world(monkeypatch):
         def __init__(self, s): pass
         async def has_open_entry(self, lead_id): return w.open_entry
         async def enqueue(self, **kw): w.enqueued.append(kw)
+        async def last_campaign_for_lead(self, lead_id): return None
+
+    import domain.spend as spend
+    w.spend = []
+
+    async def _record_sms(session, **kw):
+        w.spend.append(kw)
+        return 0.013
+    monkeypatch.setattr(spend, "record_sms", _record_sms)
+    w.budget_ok = True
+
+    async def _within(session, **kw):
+        return w.budget_ok
+    monkeypatch.setattr(spend, "sms_within_budget", _within)
 
     monkeypatch.setattr(db_session, "session_scope", _scope)
     monkeypatch.setattr(repos, "FollowupRepo", _FollowupRepo)
@@ -161,6 +175,7 @@ async def test_eligible_sms_in_window_is_sent(world):
     assert to == "+15555550142"
     assert "Reply STOP" in body and "Pat" in body
     assert world.statuses == {t.id: "sent"}
+    assert len(world.spend) == 1, "every sent SMS is booked to the spend ledger"
 
 
 async def test_callback_is_queued_for_the_dialer_not_dialed_directly(world):
@@ -210,3 +225,16 @@ async def test_consent_request_is_queued_as_a_gated_task_not_sent_inline(monkeyp
     assert len(created) == 1
     assert created[0]["context_data"] == {"_channel": "sms", "_template": "consent_request"}
     assert created[0]["fire_at"] <= datetime.now(timezone.utc) + timedelta(seconds=1)
+
+
+async def test_text_over_budget_is_deferred_to_tomorrow_not_sent(world):
+    """Texts cost money too: past the daily ceiling or the campaign budget they
+    wait (a raised budget lets them through), they are never sent over it."""
+    world.budget_ok = False
+    t = _task()
+    world.tasks = [t]
+    sms = _Sms()
+
+    assert await run_due_tasks(sms) == 0
+    assert sms.sent == [] and world.spend == []
+    assert t.id in world.rescheduled and world.statuses == {}

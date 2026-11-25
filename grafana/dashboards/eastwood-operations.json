@@ -2,7 +2,7 @@
   "uid": "eastwood-ops",
   "title": "Eastwood operations",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "time": {
     "from": "now-6h",
     "to": "now"
@@ -329,7 +329,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 38,
         "w": 24,
         "h": 5
       },
@@ -342,6 +342,99 @@
           },
           "expr": "up",
           "legendFormat": "{{job}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Estimated spend, last 24 h (USD)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "eastwood-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eastwood-prometheus"
+          },
+          "expr": "sum(increase(eastwood_spend_usd_total[24h]))"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Dial attempts per minute",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "eastwood-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 31,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eastwood-prometheus"
+          },
+          "expr": "sum(rate(eastwood_outbound_contact_decisions_total{channel=\"dial\",result=\"sent\"}[5m])) * 60"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Budget holds / halts (5 m)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "eastwood-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 31,
+        "w": 8,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "eastwood-prometheus"
+          },
+          "expr": "sum by (result) (increase(eastwood_outbound_contact_decisions_total{result=~\"budget_.*\"}[5m]))",
+          "legendFormat": "{{result}}"
         }
       ],
       "fieldConfig": {
