@@ -84,6 +84,21 @@ the signed `/twilio/sms` webhook, and the synthetic rate sheet verified through
   - the voice agent's $99 "Eastwood Preferred" fallback
   - a deferred booking confirmation that never sent
 
+### Carrier rate books — 2026-11-25 (third run)
+
+- **Import path.** Carrier rate books import without a subscription: `scripts/rates.py extract`
+  handles per-$1,000 tables and premium grids, two-line and merged-cell headers, books with no
+  tobacco split, and continued tables. Scans are refused.
+- **Tests.** Every layout is checked cell by cell against the synthetic formula it was generated
+  from. On a real carrier chart (Mutual of Omaha's public Guaranteed Whole Life chart) all 410
+  printed premiums read exactly; it was not loaded, because it is the direct-to-consumer channel.
+- **New sheet types.** Two new rate units, `per_1000_monthly` and `flat_annual`.
+- **Safeguards.** Grid sheets quote only printed face amounts; verification now needs a check for
+  every rate class; the live test refuses to start without a verified, non-test sheet for the
+  recipient and an open calendar slot.
+- **Tests:** eastwood-core **512 passed** (incl. OCR) + **26 database integration passed**;
+  ai-agent **270 passed**.
+
 Defects found and fixed in the first run (commit `bdcbebb`): follow-ups and
 consent SMS bypassed every compliance gate; texted STOP never suppressed
 calls; synthetic seed rates were quoted as named carrier rates; Prometheus
@@ -264,15 +279,19 @@ The formula estimator and the CMS adapter are internal tools only. Details:
 - [x] `bindable=false` on everything; the appointment is the close
 
 ### With verified rate sheets: preliminary carrier rates
-- [ ] Obtain each carrier's current rate book (through your appointment) or a
-      licensed rate source for every product and state you will quote
-- [ ] `python -m scripts.rates import rates.csv --meta meta.json` for each plan
-      (rates per $1,000 by age, sex, tobacco and tier; policy fee; modal
-      factors; rounding; effective and expiry dates; source document)
-- [ ] `python -m scripts.rates verify <sheet_id> --checks checks.csv --verified-by "<name>"`
-      with **at least three** spot checks copied from the carrier's own quote
-      tool, spread across ages, sexes, tobacco and tiers. Every one must match
-      to the cent, or the sheet stays `draft`
+Sources, access and costs per carrier: [`carrier-quoting-matrix.md`](carrier-quoting-matrix.md).
+Commands on the server: [`operator-runbook.md` §3](operator-runbook.md#3-carrier-rates-once-per-plan-again-whenever-the-carrier-changes-rates).
+
+- [ ] Obtain each carrier's current **digital** rate book for the channel you sell
+      through (PDF with text, XLSX or CSV), via your appointment / agent portal
+- [ ] `python -m scripts.rates extract <book> --unit <unit> --out <dir>`; read
+      `report.txt` (tables, classes, ages, gaps, anomalies)
+- [ ] Fill every null in `meta.template.json` from the rate book (policy fee,
+      modal factors, rounding, face limits, states, dates, tier questions)
+- [ ] `python -m scripts.rates checks-template` → price each case in the
+      carrier's own quote tool → `import` → `verify`. Every check must match to
+      the cent and **every rate class** (sex × tobacco × tier) needs one, or the
+      sheet stays `draft`
 - [ ] Spot-check more cases with `python -m scripts.rates quote …` against the
       carrier portal before the first campaign
 - [ ] Retire a sheet when the carrier changes rates (`retire`). Expired sheets

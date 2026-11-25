@@ -6,7 +6,7 @@
 
 Eastwood takes purchased or inbound leads, decides who may lawfully be contacted and who is worth contacting, and has **Imogen**, an AI assistant, work them. Text comes first: a two-way SMS conversation that qualifies the prospect, quotes only from verified carrier rate sheets, and books them with a licensed human agent who closes. A realtime voice mode runs the same discovery by phone when a campaign opts in. Every step is gated in code, not by prompting a model to behave.
 
-> **Status: pre-launch.** The application is built and test-verified (758 unit and end-to-end tests, plus 24 database integration tests). It was verified end to end against an isolated stack with simulated providers: a 27,000-lead voice load test, and an SMS-first commercial acceptance test from upload to booked appointment (1,444 leads; every stated premium matched the rate book; no double booking). The remaining go-live work is credentials, registrations, verified carrier rates, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md), [`docs/sms-first-engine.md`](docs/sms-first-engine.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
+> **Status: pre-launch.** The application is built and test-verified (782 unit and end-to-end tests, plus 26 database integration tests). It was verified end to end against an isolated stack with simulated providers: a 27,000-lead voice load test, and an SMS-first commercial acceptance test from upload to booked appointment (1,444 leads; every stated premium matched the rate book; no double booking). The remaining go-live work is credentials, registrations, verified carrier rates, data, and legal sign-off, in the order given by [`docs/operator-runbook.md`](docs/operator-runbook.md); see also [`docs/go-live-checklist.md`](docs/go-live-checklist.md), [`docs/sms-first-engine.md`](docs/sms-first-engine.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
 
 ---
 
@@ -90,7 +90,7 @@ Eastwood takes purchased or inbound leads, decides who may lawfully be contacted
 `update_lead_field`, `add_followup_questions`, `get_quote`, `select_quote_option`, `get_booking_slots`, `book_appointment`, `capture_consent`, `capture_objection`, `capture_dnc`, `transfer_live`, `transfer_to_human`, `end_call`. Availability is derived from what has been captured (`ai-agent/src/tools/toolGating.ts`). After a do-not-call request, only `end_call` remains.
 
 ### Quoting
-- **Prospects see verified rates only.** Carrier rate books are loaded as rate sheets (`scripts/rates.py`: age, sex, tobacco, tier, policy fee, modal factors, rounding, effective dates, source document) and quote only after at least three spot checks from the carrier's own quote tool match to the cent
+- **Prospects see verified rates only.** A carrier's own rate book (PDF with text, XLSX or CSV) is extracted into a rate sheet (`scripts/rates.py extract`: per-$1,000 rates or premium grids by face amount, with age, sex, tobacco, tier, policy fee, modal factors, rounding, effective dates and source document). It quotes only after spot checks from the carrier's own quote tool match to the cent, covering every rate class. Sources, access and costs per carrier: [`docs/carrier-quoting-matrix.md`](docs/carrier-quoting-matrix.md)
 - Every option a prospect sees is stored with a quote id, a short `Q` reference, its source and rate sheet. A text can state only those figures. Quotes are labelled preliminary and never bindable
 - With no verified sheet for a prospect, Imogen says she cannot give an exact rate and offers the agent. She never estimates
 - Deterministic three-option logic (C need / B recommended / A most within budget)
@@ -164,7 +164,7 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 | AI | OpenAI Realtime `gpt-realtime-2` (voice "shimmer"), `gpt-4o-transcribe` with logprobs, tuned server VAD |
 | Data | PostgreSQL 16 (two databases, 11 SQL migrations), Apache Kafka 3.7 (KRaft), Redis 7 |
 | Infrastructure | Docker Compose (9 services), nginx 1.25, Prometheus, Grafana |
-| Testing | pytest (488 unit tests incl. OCR, + 24 database integration tests), `node:test` via tsx (270 tests, including end-to-end call simulations), a 27,000-lead voice load test and an SMS-first acceptance test with simulated providers |
+| Testing | pytest (512 unit tests incl. OCR, + 26 database integration tests), `node:test` via tsx (270 tests, including end-to-end call simulations), a 27,000-lead voice load test and an SMS-first acceptance test with simulated providers |
 | Legacy pipeline (`src/`) | kafka-python, psycopg 3, Redis idempotency keys, booking tokens, consent evidence packs |
 
 ## Repository layout
@@ -180,8 +180,9 @@ landing/         Static landing page, lead uploader, and risk-scan funnel (serve
 nginx/           Edge proxy config
 scripts/         DB init, migrations, turn-latency report
 showcase/        The public capabilities site (deployed to Vercel)
-docs/            Go-live checklist; launch dependencies and costs; SMS-first engine; controlled live
-                 SMS test; import and campaign runbook; capacity and load test
+docs/            Operator runbook (start here); carrier quoting matrix; go-live checklist; launch
+                 dependencies and costs; SMS-first engine; controlled live SMS test; import and
+                 campaign runbook; capacity and load test
 grafana/         Provisioned Prometheus datasource and operations dashboard
 ```
 

@@ -1,7 +1,7 @@
 # Launch dependencies, credentials, regulatory prerequisites, and costs
 
 What Eastwood still needs from outside the codebase before a lawful, operational
-launch, and what it costs. The application work is done (see the verification
+launch, and what it costs. The step-by-step order is [operator-runbook.md](operator-runbook.md). The application work is done (see the verification
 record in [`go-live-checklist.md`](go-live-checklist.md)); everything here is an
 account, a credential, a registration, a legal sign-off, or money.
 
@@ -191,7 +191,7 @@ What holds regardless of the assumptions:
 | --- | --- | --- | --- |
 | Twilio Programmable Voice, Media Streams, AMD | Outbound calls, audio to Imogen | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`; callbacks under `PUBLIC_BASE_URL` | Configured values are the pre-scrub exposed ones — **rotate** |
 | Twilio Messaging | **SMS-first conversations (default first contact)**, follow-ups, agent briefs, opt-out intake, delivery receipts | 10DLC brand + campaign; inbound webhook `POST {PUBLIC_BASE_URL}/twilio/sms` (receipts are requested per message) | Not configured |
-| Carrier rate sheets | The only source of a premium a prospect sees | `scripts/rates.py import` + `verify` (≥ 3 carrier spot checks) | **None loaded** (only the synthetic test sheet, refused in production) |
+| Carrier rate sheets | The only source of a premium a prospect sees | Carrier rate books via your appointments → `scripts/rates.py extract` → `import` → `verify` (a carrier spot check for every rate class) — see [carrier-quoting-matrix.md](carrier-quoting-matrix.md) | **None loaded** (only the synthetic test sheet, refused in production) |
 | OpenAI Realtime + `gpt-4o-transcribe` | Imogen's voice and transcript grounding | `OPENAI_API_KEY` | Exposed key — **rotate** |
 | FTC National DNC Registry | Clearing numbers to dial | `DNC_SAN`, `DNC_REGISTRY_USERNAME`, `DNC_REGISTRY_PASSWORD`, `DNC_AREA_CODES`, `DNC_REGISTRY_DOWNLOAD_URL` | Not configured |
 | Public HTTPS origin | Every Twilio webhook | `PUBLIC_BASE_URL` (stable, HTTPS, not a temporary tunnel) | Temporary ngrok URL in dev only |

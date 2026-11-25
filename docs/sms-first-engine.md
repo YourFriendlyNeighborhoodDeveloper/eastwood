@@ -97,6 +97,8 @@ None of these may price a prospect now.
 
 **Test sheets.** `tests/fixtures/rate_sheets/make_test_sheet.py` writes a synthetic sheet, "Synthetic Test Life (NOT A REAL CARRIER)", flagged `is_test`. It quotes only with `ALLOW_TEST_RATE_SHEETS=true`, which production refuses to boot with, and every text it prices starts "TEST RATES, not a real carrier."
 
+**Importing a carrier's rate book.** `python -m scripts.rates extract` reads the carrier's digital rate book (PDF with text, XLSX or CSV) into the sheet format, with a report and a meta template. It handles four layouts: annual or monthly rates per $1,000, and monthly or annual premium grids. A grid sheet quotes only the face amounts it prints, and prospect options snap to them. Verification requires a check for every rate class. Sources, access and costs: [carrier-quoting-matrix.md](carrier-quoting-matrix.md).
+
 **Verified carrier rates in this repository: none.** Loading them is an operator step that needs the carrier rate books and appointment paperwork, or a licensed rate source such as Compulife (supports final expense) ([launch-dependencies-and-costs.md](launch-dependencies-and-costs.md)).
 
 ## Ingestion
