@@ -274,7 +274,7 @@ class _DialLoopQueueRepo(_FakeDialQueueRepo):
     async def count_active_by_campaign(self):
         return {}
 
-    async def get_due(self, now, limit=10):
+    async def get_due(self, now, limit=10, tenant_id=None):
         return _DialLoopQueueRepo.due
 
     async def mark_terminal(self, entry_id, status):

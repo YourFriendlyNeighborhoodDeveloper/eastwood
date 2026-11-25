@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import text as _sql_text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -75,6 +77,9 @@ class Lead(Base):
     external_id: Mapped[str | None] = mapped_column(String(128))
     acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     import_batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    # Quoting facts known from the source file (prefill; the prospect can correct).
+    sex: Mapped[str | None] = mapped_column(String(1))
+    tobacco: Mapped[bool | None] = mapped_column(Boolean)
     # Per-channel authorization from domain.imports.classify:
     #   {"ai_voice": bool, "sms": bool, "manual_call": bool, "evaluated_at": iso}
     # The dialer requires ai_voice=true; marketing SMS requires sms=true.
@@ -157,6 +162,11 @@ class Appointment(Base):
         String(32), nullable=False, default="not_requested", server_default="not_requested"
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # attended | no_show | cancelled | rescheduled | sold
+    outcome: Mapped[str | None] = mapped_column(String(16))
+    reminders_sent: Mapped[list | None] = mapped_column(JSONB)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     slot: Mapped[BookingSlot] = relationship("BookingSlot", back_populates="appointments")
 
@@ -209,6 +219,14 @@ class QuoteRecord(Base):
     carrier: Mapped[str | None] = mapped_column(String(128))
     quote_data: Mapped[dict | None] = mapped_column(JSONB)
     presented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Prospect-facing quotes (domain.quoting.prospect): a short human reference,
+    # the rate source, the exact rate sheet, the conversation it was quoted in,
+    # and when it was actually communicated to the prospect.
+    quote_ref: Mapped[str | None] = mapped_column(String(16), index=True)
+    source: Mapped[str | None] = mapped_column(String(32))
+    rate_sheet_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    communicated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LeadBatch(Base):
@@ -460,6 +478,13 @@ class Campaign(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     halted_reason: Mapped[str | None] = mapped_column(Text)
+    # sms_first (default) | voice_first
+    channel_strategy: Mapped[str] = mapped_column(String(16), nullable=False, default="sms_first")
+    messages_per_minute: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
+    daily_message_cap: Mapped[int | None] = mapped_column(Integer)
+    # A prospect who asks for a call may be escalated to an AI-voice call (only
+    # if also authorized for AI voice); otherwise the licensed agent is alerted.
+    escalate_to_voice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class DialAttempt(Base):
@@ -493,3 +518,129 @@ class SpendEntry(Base):
     amount_usd: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
     reference: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+
+class RateSheet(Base):
+    """A carrier rate book, imported as data and quoted only once VERIFIED.
+
+    Verification (domain.quoting.rate_sheets.verify_rate_sheet) requires spot
+    checks copied from the carrier's own quote tool or illustration to be
+    reproduced to the cent. Draft, retired, expired, out-of-state and test
+    sheets never price a prospect-facing quote in production.
+    """
+    __tablename__ = "rate_sheets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    carrier: Mapped[str] = mapped_column(String(128), nullable=False)
+    product_line: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    states: Mapped[list] = mapped_column(JSONB, nullable=False)            # USPS codes where sold
+    effective_date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    expires_date: Mapped[datetime | None] = mapped_column(Date)
+    rate_unit: Mapped[str] = mapped_column(String(24), nullable=False)      # per_1000_annual | flat_monthly
+    policy_fee_annual: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
+    modal_factors: Mapped[dict] = mapped_column(JSONB, nullable=False)     # mode -> factor on annual premium
+    min_face: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_face: Mapped[int] = mapped_column(Integer, nullable=False)
+    face_increment: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)
+    default_tier: Mapped[str] = mapped_column(String(24), nullable=False, default="level")
+    tier_questions: Mapped[list | None] = mapped_column(JSONB)            # [{key, text, yes_tier}]
+    source_document: Mapped[str] = mapped_column(Text, nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")  # draft|verified|retired
+    is_test: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    verified_by: Mapped[str | None] = mapped_column(String(128))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification: Mapped[list | None] = mapped_column(JSONB)              # spot checks and results
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RateSheetRate(Base):
+    __tablename__ = "rate_sheet_rates"
+    __table_args__ = (
+        UniqueConstraint("sheet_id", "age", "sex", "tobacco", "tier", "face", name="uq_rate_sheet_cell"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    sheet_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    age: Mapped[int] = mapped_column(Integer, nullable=False)
+    sex: Mapped[str] = mapped_column(String(1), nullable=False)            # M | F | U (unisex)
+    tobacco: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    tier: Mapped[str] = mapped_column(String(24), nullable=False)
+    face: Mapped[int] = mapped_column(Integer, nullable=False, default=0)  # 0 = per-unit rate
+    rate: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False)
+
+
+class SmsConversation(Base):
+    """One SMS relationship with one lead, persisted across days."""
+    __tablename__ = "sms_conversations"
+    __table_args__ = (UniqueConstraint("tenant_id", "lead_id", name="uq_sms_conversation_lead"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    lead_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    phone_e164: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    # pending | active | booked | declined | opted_out | handoff | dormant | closed
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", index=True)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="outreach")
+    slots: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    followups_sent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inbound_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    outbound_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_outbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    next_action: Mapped[str | None] = mapped_column(String(32))
+    llm_tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    llm_tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class SmsMessage(Base):
+    __tablename__ = "sms_messages"
+    __table_args__ = (
+        # An outbound step is sent at most once (crash/retry safe).
+        UniqueConstraint("conversation_id", "step_key", name="uq_sms_step"),
+        # A provider message is processed at most once (webhook retries).
+        Index("ux_sms_inbound_sid", "provider_sid", unique=True, postgresql_where=_sql_text("direction = 'in'")),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(3), nullable=False)        # in | out
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    segments: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    encoding: Mapped[str] = mapped_column(String(8), nullable=False, default="GSM-7")
+    provider_sid: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="sent")
+    step_key: Mapped[str | None] = mapped_column(String(64))
+    intent: Mapped[str | None] = mapped_column(String(48))
+    quote_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    llm_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 5), nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=_sql_text("clock_timestamp()"), index=True)
+
+
+class PolicySale(Base):
+    """A policy the licensed agent wrote from an Eastwood appointment."""
+    __tablename__ = "policy_sales"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    lead_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    carrier: Mapped[str | None] = mapped_column(String(128))
+    product_line: Mapped[str | None] = mapped_column(String(64))
+    annual_premium_usd: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    commission_usd: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    sold_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    notes: Mapped[str | None] = mapped_column(Text)

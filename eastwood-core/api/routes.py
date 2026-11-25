@@ -276,6 +276,9 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
     body: dict = await request.json()
     settings = get_settings()
 
+    if settings.prospect_quotes_require_verified:
+        return await _verified_quote(body, session, settings)
+
     face_value_dollars = body.get("face_value", 10_000)
     condition_codes: set[str] = set(body.get("condition_codes", []))
     tobacco_raw = body.get("tobacco", False)
@@ -370,6 +373,70 @@ async def get_quote(request: Request, session: AsyncSession = Depends(get_sessio
         "options": tiered_options,
         "errors": response.errors,
     }
+
+
+async def _verified_quote(body: dict, session: AsyncSession, settings) -> dict:
+    """Quotes a prospect may hear: exact premiums from VERIFIED carrier rate
+    sheets only, each option stored (quote_id / quote_ref) before it is
+    returned. No verified rate → no number, with the reasons — the caller must
+    offer the licensed agent instead of estimating."""
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+    from db.models import Lead as _Lead
+    from domain.quoting.prospect import quote_for_prospect
+
+    product = body.get("product_line", "final_expense")
+    tob_raw = body.get("tobacco")
+    tobacco = None if tob_raw is None else (tob_raw if isinstance(tob_raw, bool)
+                                            else str(tob_raw).lower() in ("true", "yes", "1", "current"))
+    sex = (str(body.get("gender") or body.get("sex") or "").strip().upper()[:1] or None)
+
+    def _int(key):
+        try:
+            n = int(float(body.get(key)))
+            return n if n > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    base = {"quote_policy": "verified_rate_sheets_only", "fetched_at": _dt.now(_tz.utc).isoformat(),
+            "quote_type": "estimated", "rate_source": "none", "carrier_rate": False, "bindable": False,
+            "best": None, "all_options": [], "options": [], "errors": []}
+    try:
+        lead_uuid = _uuid.UUID(str(body.get("lead_id")))
+        lead = await session.get(_Lead, lead_uuid)
+    except (ValueError, TypeError):
+        lead = None
+    if lead is None or lead.tenant_id != pinned_tenant_id():
+        return {**base, "unavailable_reasons": ["a quote is stored against a lead; lead_id is unknown"]}
+    if product not in ("final_expense", "life"):
+        return {**base, "unavailable_reasons": [f"no verified rate source for {product}"]}
+
+    result = await quote_for_prospect(
+        session, tenant_id=lead.tenant_id, lead_id=lead.id, product_line=product,
+        state=body.get("state") or lead.state, age=body.get("age") or lead.age,
+        sex=sex if sex in ("M", "F") else (lead.sex if lead.sex in ("M", "F") else None),
+        tobacco=tobacco if tobacco is not None else lead.tobacco, tier=body.get("rate_tier"),
+        desired_face=_int("desired_coverage_amount"), purpose=body.get("burial_or_cremation") or body.get("coverage_purpose"),
+        monthly_budget=_int("monthly_budget"),
+    )
+    await session.commit()
+    if not result.ok:
+        return {**base, "unavailable_reasons": result.unavailable_reasons, "missing": result.missing}
+
+    def _payload(o) -> dict:
+        source = "rate_sheet_test" if o.is_test else "rate_sheet"
+        return {"label": o.label, "face_value": o.face, "monthly_premium": float(o.monthly_premium),
+                "carrier": o.carrier, "plan_name": o.plan_name, "rate_tier": o.tier,
+                "within_budget": o.within_budget, "quote_id": o.quote_id, "quote_ref": o.quote_ref,
+                "quote_type": "test" if o.is_test else "carrier", "rate_source": source,
+                "carrier_rate": not o.is_test, "bindable": False, "preliminary": True, "source": source}
+
+    options = [_payload(o) for o in result.options]
+    best = options[min(1, len(options) - 1)]
+    return {**base, "quote_type": best["quote_type"], "rate_source": best["rate_source"],
+            "carrier_rate": best["carrier_rate"], "quote_source": best["rate_source"],
+            "best": best, "all_options": options, "options": options,
+            "unavailable_reasons": result.unavailable_reasons}
 
 
 # ── Appointment booking ───────────────────────────────────────────────────────
@@ -1000,10 +1067,25 @@ async def twilio_inbound_sms(request: Request, session: AsyncSession = Depends(g
     form = await request.form()
     phone = normalize_phone(str(form.get("From", "")))
     body = str(form.get("Body", ""))
+    if phone and not is_opt_out(body):
+        engine = getattr(request.app.state, "sms_engine", None)
+        if engine is not None:
+            try:
+                segs = int(str(form.get("NumSegments") or 1))
+            except ValueError:
+                segs = 1
+            result = await engine.handle_inbound(phone=phone, body=body, num_segments=segs,
+                                                 provider_sid=str(form.get("MessageSid") or ""))
+            logger.info("inbound SMS handled: %s", {k: v for k, v in result.items() if k != "phone"})
     if phone and is_opt_out(body):
+        try:
+            segs = int(str(form.get("NumSegments") or 1))
+        except ValueError:
+            segs = 1
         result = await apply_opt_out(
             session, pinned_tenant_id(), phone,
             note=f"SMS opt-out, MessageSid={str(form.get('MessageSid', ''))[:64]}",
+            body=body, provider_sid=str(form.get("MessageSid") or "")[:64] or None, segments=segs,
         )
         await session.commit()
         logger.warning(
@@ -1015,6 +1097,26 @@ async def twilio_inbound_sms(request: Request, session: AsyncSession = Depends(g
         content='<?xml version="1.0" encoding="UTF-8"?><Response></Response>',
         media_type="application/xml",
     )
+
+
+@router.post("/twilio/sms-status/{message_id}")
+async def twilio_sms_status(message_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+    """Delivery receipts for outbound texts (MessageStatus: sent/delivered/undelivered/failed)."""
+    import uuid as _uuid
+    from db.models import SmsMessage as _Msg
+
+    form = await request.form()
+    status_value = str(form.get("MessageStatus", ""))[:16]
+    try:
+        msg = await session.get(_Msg, _uuid.UUID(message_id))
+    except ValueError:
+        msg = None
+    # Receipts can arrive out of order ("delivered" before "sent"): never step back.
+    rank = {"sending": 0, "queued": 0, "accepted": 0, "sent": 1, "undelivered": 2, "failed": 2, "delivered": 3}
+    if msg is not None and status_value in rank and rank[status_value] >= rank.get(msg.status, -1):
+        msg.status = status_value
+        await session.commit()
+    return {"received": True}
 
 
 _ai_agent_client = None
@@ -1217,14 +1319,15 @@ async def get_campaign_route(campaign_id: str, session: AsyncSession = Depends(g
 @router.post("/api/campaigns/{campaign_id}/enqueue")
 async def enqueue_campaign(campaign_id: str, request: Request, session: AsyncSession = Depends(get_session)):
     """Queue the leads this campaign may call (authorized, DNC-cleared, in scope)."""
-    from domain.campaigns import enqueue_leads
+    from domain.campaigns import enqueue_leads, enqueue_sms
 
     c = await _campaign_or_404(session, campaign_id)
     try:
         body = await request.json()
     except Exception:
         body = {}
-    result = await enqueue_leads(session, c, limit=(body or {}).get("limit"))
+    enqueue = enqueue_sms if c.channel_strategy == "sms_first" else enqueue_leads
+    result = await enqueue(session, c, limit=(body or {}).get("limit"))
     await session.commit()
     return result
 
@@ -1276,3 +1379,277 @@ async def operations_report_route(since: str | None = None, until: str | None = 
 
     return await operations_report(session, tenant_id=pinned_tenant_id(), since=parse(since),
                                    until=parse(until), campaign_id=campaign_id)
+
+
+
+@router.get("/api/conversations")
+async def list_conversations(status: str | None = None, campaign_id: str | None = None, limit: int = 50,
+                             session: AsyncSession = Depends(get_session)):
+    from sqlalchemy import select as _select
+    from db.models import Lead as _Lead, SmsConversation as _Conv
+
+    q = _select(_Conv, _Lead).join(_Lead, _Lead.id == _Conv.lead_id).where(_Conv.tenant_id == pinned_tenant_id())
+    if status:
+        q = q.where(_Conv.status == status)
+    if campaign_id:
+        q = q.where(_Conv.campaign_id == campaign_id)
+    rows = (await session.execute(q.order_by(_Conv.updated_at.desc()).limit(max(1, min(limit, 500))))).all()
+    return {"conversations": [{
+        "id": str(c.id), "lead_id": str(c.lead_id), "name": " ".join(x for x in (l.first_name, l.last_name) if x),
+        "status": c.status, "stage": c.stage, "expecting": (c.slots or {}).get("expecting"),
+        "inbound": c.inbound_count, "outbound": c.outbound_count, "cost_usd": float(c.cost_usd or 0),
+        "next_action": c.next_action, "next_action_at": c.next_action_at.isoformat() if c.next_action_at else None,
+        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+    } for c, l in rows]}
+
+
+@router.get("/api/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str, session: AsyncSession = Depends(get_session)):
+    import uuid as _uuid
+    from sqlalchemy import select as _select
+    from db.models import Lead as _Lead, QuoteRecord as _Q, SmsConversation as _Conv, SmsMessage as _Msg
+
+    try:
+        conv = await session.get(_Conv, _uuid.UUID(conversation_id))
+    except ValueError:
+        conv = None
+    if conv is None or conv.tenant_id != pinned_tenant_id():
+        raise HTTPException(status_code=404, detail="conversation not found")
+    lead = await session.get(_Lead, conv.lead_id)
+    msgs = (await session.execute(_select(_Msg).where(_Msg.conversation_id == conv.id)
+                                  .order_by(_Msg.created_at))).scalars()
+    quotes = (await session.execute(_select(_Q).where(_Q.conversation_id == conv.id))).scalars()
+    return {
+        "id": str(conv.id), "status": conv.status, "stage": conv.stage, "slots": conv.slots,
+        "lead": {"id": str(lead.id), "name": " ".join(x for x in (lead.first_name, lead.last_name) if x),
+                 "phone_e164": lead.phone_e164, "state": lead.state},
+        "messages": [{"direction": m.direction, "body": m.body, "at": m.created_at.isoformat() if m.created_at else None,
+                      "status": m.status, "segments": m.segments, "intent": m.intent, "quote_id": str(m.quote_id) if m.quote_id else None,
+                      "llm_used": m.llm_used} for m in msgs],
+        "quotes": [{"quote_id": str(q.id), "quote_ref": q.quote_ref, "carrier": q.carrier, "face": int((q.face_value or 0) / 100),
+                    "monthly_premium": str(q.monthly_premium), "source": q.source, "rate_sheet_id": str(q.rate_sheet_id) if q.rate_sheet_id else None,
+                    "communicated_at": q.communicated_at.isoformat() if q.communicated_at else None} for q in quotes],
+        "appointment_id": str(conv.appointment_id) if conv.appointment_id else None,
+        "cost_usd": float(conv.cost_usd or 0),
+    }
+
+
+# ── Upload → preview → import (operator dashboard) ────────────────────────────
+
+_UPLOAD_DIR = "data/private/uploads"
+_MAX_UPLOAD_BYTES = 60 * 1024 * 1024
+_background: set = set()
+
+
+def _upload_path(upload_id: str):
+    import pathlib
+    import re as _re
+
+    if not _re.fullmatch(r"[0-9a-f]{64}", upload_id or ""):
+        raise HTTPException(status_code=404, detail="upload not found")
+    matches = [m for m in pathlib.Path(_UPLOAD_DIR).glob(f"{upload_id}.*")
+               if m.suffix.lower() in (".csv", ".txt", ".xlsx", ".pdf")]   # not the .name sidecar
+    if not matches:
+        raise HTTPException(status_code=404, detail="upload not found")
+    return matches[0]
+
+
+@router.post("/api/imports/upload")
+async def upload_lead_file(request: Request):
+    """Store an uploaded CSV / XLSX / PDF (private volume) and preview it."""
+    import hashlib
+    import pathlib
+    from domain.imports.preview import preview_file
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(status_code=422, detail="multipart field 'file' is required")
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="empty file")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (60 MB max)")
+    name = pathlib.Path(str(getattr(upload, "filename", "") or "upload")).name
+    ext = (pathlib.Path(name).suffix.lower() or ".csv")[:6]
+    if ext not in (".csv", ".txt", ".xlsx", ".pdf"):
+        raise HTTPException(status_code=415, detail="upload a .csv, .xlsx or .pdf file")
+    digest = hashlib.sha256(data).hexdigest()
+    folder = pathlib.Path(_UPLOAD_DIR)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{digest}{ext}"
+    path.write_bytes(data)
+    (folder / f"{digest}.name").write_text(name[:200])
+    import asyncio as _asyncio
+
+    preview = await _asyncio.to_thread(preview_file, path)
+    return {"upload_id": digest, "file_name": name, "size_bytes": len(data), "preview": preview}
+
+
+@router.post("/api/imports/uploads/{upload_id}/preview")
+async def preview_upload(upload_id: str, request: Request):
+    import asyncio as _asyncio
+    from domain.imports.preview import preview_file
+
+    body = await request.json()
+    path = _upload_path(upload_id)
+    return await _asyncio.to_thread(preview_file, path, (body or {}).get("overrides") or {})
+
+
+@router.post("/api/imports/uploads/{upload_id}/import", status_code=202)
+async def import_upload(upload_id: str, request: Request):
+    """Start importing an uploaded file in the background (idempotent per file)."""
+    import asyncio as _asyncio
+    from datetime import date as _date
+    from domain.imports import ImportOptions, run_import
+
+    body = await request.json() or {}
+    path = _upload_path(upload_id)
+    if not str(body.get("source") or "").strip():
+        raise HTTPException(status_code=422, detail="source is required")
+    try:
+        acquired = _date.fromisoformat(body["acquired"]) if body.get("acquired") else None
+    except ValueError:
+        raise HTTPException(status_code=422, detail="acquired must be YYYY-MM-DD") from None
+    label_file = path.with_suffix(".name")
+    opts = ImportOptions(source_name=str(body["source"]).strip(), lead_owner=body.get("owner"),
+                         acquisition_date=acquired, use_authorization_ref=body.get("use_authorization") or None,
+                         column_overrides=body.get("overrides") or {}, tenant_id=pinned_tenant_id(),
+                         file_label=label_file.read_text().strip() if label_file.exists() else None)
+
+    async def _go():
+        # Import, then the same offline preparation the CLI runs (National DNC
+        # scrub against the downloaded registry, then triage and scoring), so
+        # an upload from the dashboard is campaign-ready. Contacts no one.
+        from domain.lead_ops import qualify_imported, scrub_unknown
+
+        try:
+            result = await run_import(path, opts)
+            scrub = await scrub_unknown()
+            qualify = await qualify_imported()
+            logger.info("upload %s imported %s; scrub %s; qualify %s", upload_id[:12],
+                        result.as_dict().get("inserted"), scrub.get("by_status"), qualify.get("by_status"))
+        except Exception:
+            logger.exception("background import of upload %s failed", upload_id[:12])
+
+    task = _asyncio.create_task(_go())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return {"started": True, "upload_id": upload_id, "note": "poll GET /api/imports for progress"}
+
+
+# ── Dashboard: overview, appointments, outcomes ───────────────────────────────
+
+@router.get("/api/dashboard/overview")
+async def dashboard_overview(campaign_id: str | None = None, session: AsyncSession = Depends(get_session)):
+    from sqlalchemy import text as _text
+
+    p = {"t": pinned_tenant_id(), "c": campaign_id}
+    camp_conv = " AND c.campaign_id = CAST(:c AS uuid)" if campaign_id else ""
+    camp = " AND campaign_id = CAST(:c AS uuid)" if campaign_id else ""
+    one = lambda sql: session.execute(_text(sql), p)  # noqa: E731
+    leads = (await one("SELECT count(*) FROM leads WHERE tenant_id = :t")).scalar_one()
+    msgs = (await one(f"""SELECT count(*) FILTER (WHERE m.direction = 'out' AND m.status IN ('sent','delivered')),
+                                 count(*) FILTER (WHERE m.direction = 'in'),
+                                 coalesce(sum(m.segments) FILTER (WHERE m.direction = 'out' AND m.status IN ('sent','delivered')), 0)
+                          FROM sms_messages m JOIN sms_conversations c ON c.id = m.conversation_id
+                          WHERE c.tenant_id = :t{camp_conv}""")).one()
+    conv = dict((await one(f"""SELECT c.status, count(*) FROM sms_conversations c WHERE c.tenant_id = :t{camp_conv}
+                               GROUP BY c.status""")).all())
+    replied = (await one(f"SELECT count(*) FROM sms_conversations c WHERE c.tenant_id = :t AND c.inbound_count > 0{camp_conv}")).scalar_one()
+    qualified = (await one(f"""SELECT count(*) FROM sms_conversations c WHERE c.tenant_id = :t
+                               AND (c.slots ? 'options' OR c.slots ? 'unavailable'){camp_conv}""")).scalar_one()
+    quotes = (await one(f"""SELECT count(DISTINCT q.conversation_id) FROM quote_records q
+                            JOIN sms_conversations c ON c.id = q.conversation_id WHERE c.tenant_id = :t
+                            AND q.communicated_at IS NOT NULL{camp_conv}""")).scalar_one()
+    appts = dict((await one(f"""SELECT coalesce(a.outcome, a.status), count(*) FROM appointments a
+                                LEFT JOIN sms_conversations c ON c.id = a.conversation_id
+                                WHERE a.tenant_id = :t{camp_conv if campaign_id else ''} GROUP BY 1""")).all())
+    booked = sum(n for k, n in appts.items() if k not in ("cancelled", "rescheduled"))
+    sales = (await one(f"""SELECT count(*), coalesce(sum(annual_premium_usd),0), coalesce(sum(commission_usd),0)
+                           FROM policy_sales WHERE tenant_id = :t{camp}""")).one()
+    spend = float((await one(f"SELECT coalesce(sum(amount_usd),0) FROM spend_ledger WHERE tenant_id = :t{camp}")).scalar_one())
+    attended = appts.get("attended", 0) + appts.get("sold", 0)
+    commissions = float(sales[2])
+    return {
+        "campaign_id": campaign_id,
+        "imported_leads": leads,
+        "sms_sent": msgs[0], "sms_segments_sent": int(msgs[2]), "replies_received": msgs[1],
+        "conversations": conv, "prospects_replied": replied,
+        "active_conversations": conv.get("active", 0) + conv.get("contacted", 0),
+        "qualified_prospects": qualified, "quotes_communicated": quotes,
+        "appointments_booked": booked, "appointments_by_outcome": appts,
+        "appointments_attended": attended, "policies_sold": sales[0],
+        "annual_premium_written_usd": float(sales[1]), "commissions_usd": commissions,
+        "spend_usd": round(spend, 2),
+        "cost_per_booked_appointment_usd": round(spend / booked, 2) if booked else None,
+        "profit_usd": round(commissions - spend, 2),
+    }
+
+
+@router.get("/api/appointments")
+async def list_appointments(upcoming: bool = True, limit: int = 100, session: AsyncSession = Depends(get_session)):
+    """Appointments with the full prospect profile the agent needs."""
+    from datetime import datetime as _dt, timezone as _tz
+    from sqlalchemy import select as _select
+    from db.models import Appointment as _A, BookingSlot as _S, HandoffProfile as _H, Lead as _L
+
+    q = (_select(_A, _S, _L).join(_S, _S.id == _A.slot_id).join(_L, _L.id == _A.lead_id)
+         .where(_A.tenant_id == pinned_tenant_id()))
+    if upcoming:
+        q = q.where(_S.starts_at >= _dt.now(_tz.utc), _A.status == "scheduled")
+    rows = (await session.execute(q.order_by(_S.starts_at).limit(max(1, min(limit, 500))))).all()
+    out = []
+    for a, s, lead in rows:
+        prof = (await session.execute(_select(_H.profile).where(_H.appointment_id == a.id)
+                                      .order_by(_H.created_at.desc()).limit(1))).scalar()
+        out.append({"appointment_id": str(a.id), "starts_at": s.starts_at.isoformat(), "status": a.status,
+                    "outcome": a.outcome, "lead_id": str(lead.id),
+                    "name": " ".join(x for x in (lead.first_name, lead.last_name) if x), "phone_e164": lead.phone_e164,
+                    "conversation_id": str(a.conversation_id) if a.conversation_id else None, "profile": prof or {}})
+    return {"appointments": out}
+
+
+@router.post("/api/appointments/{appointment_id}/outcome")
+async def appointment_outcome(appointment_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+    """Record attendance and sales: attended | no_show | sold (with premium and commission)."""
+    import uuid as _uuid
+    from db.models import Appointment as _A, PolicySale as _P, SmsConversation as _C
+
+    body = await request.json() or {}
+    outcome = str(body.get("outcome") or "")
+    if outcome not in ("attended", "no_show", "sold"):
+        raise HTTPException(status_code=422, detail="outcome must be attended, no_show or sold")
+    try:
+        appt = await session.get(_A, _uuid.UUID(appointment_id))
+    except ValueError:
+        appt = None
+    if appt is None or appt.tenant_id != pinned_tenant_id():
+        raise HTTPException(status_code=404, detail="appointment not found")
+    appt.outcome = outcome
+    appt.status = "completed" if outcome != "no_show" else "no_show"
+    if outcome == "sold":
+        try:
+            premium = float(body.get("annual_premium_usd") or 0)
+            commission = float(body.get("commission_usd") or 0)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="premium and commission must be numbers") from None
+        campaign_id = None
+        if appt.conversation_id:
+            conv = await session.get(_C, appt.conversation_id)
+            campaign_id = conv.campaign_id if conv else None
+        session.add(_P(tenant_id=appt.tenant_id, lead_id=appt.lead_id, appointment_id=appt.id, campaign_id=campaign_id,
+                       carrier=body.get("carrier"), product_line=body.get("product_line"),
+                       annual_premium_usd=premium, commission_usd=commission, notes=body.get("notes")))
+    await session.commit()
+    return {"appointment_id": appointment_id, "outcome": outcome}
+
+
+@router.get("/ops")
+async def operator_dashboard():
+    """The operator dashboard (static page; every data call needs the API key).
+    Served by eastwood-core only — nginx does not expose it."""
+    import pathlib
+    from starlette.responses import HTMLResponse
+
+    return HTMLResponse((pathlib.Path(__file__).resolve().parent.parent / "static" / "ops.html").read_text())

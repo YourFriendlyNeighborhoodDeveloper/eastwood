@@ -43,11 +43,13 @@ def normalize_product(raw: str | None) -> str | None:
     # Exact match against known product keys (handles "final_expense" style input)
     if lower in _PRODUCT_KEYWORDS:
         return lower
-    # Keyword search against a space-normalized version
+    # Whole-word keyword search against a space-normalized version. (Plain
+    # substring matching read "Life Insurance" as final expense, because "fe"
+    # occurs inside "life".)
     spaced = lower.replace("_", " ")
     for product, keywords in _PRODUCT_KEYWORDS.items():
         for kw in keywords:
-            if kw in spaced:
+            if re.search(rf"\b{re.escape(kw)}\b", spaced):
                 return product
     return None
 

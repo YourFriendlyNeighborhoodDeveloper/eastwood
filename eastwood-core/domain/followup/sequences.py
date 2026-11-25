@@ -2,13 +2,14 @@
 Follow-up sequence definitions.
 
 Each sequence is a list of steps with a delay and a message template.
-Templates use {first_name}, {quote_amount}, {carrier}, {last_objection}
-— populated from the lead's context_data at fire time.
+Templates use {first_name}, {agency}, {agent_name}, {quote_amount}, {carrier}
+and similar, populated from the lead's context_data at fire time.
 
 State-aware: the system knows the last call outcome and personalizes accordingly.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -21,86 +22,101 @@ class SequenceStep:
 
 
 # ── SMS message templates ─────────────────────────────────────────────────────
+# Every text names the agency ({agency}), never claims to be a specific person
+# (the call may have been placed by the AI assistant), makes no deadline or
+# "rate held" claims, and stays in the GSM-7 character set (no em dashes or
+# curly quotes: one of those switches the whole text to UCS-2, which fits 70
+# characters per segment instead of 160 and multiplies its cost). Dollar figures
+# are filled only from a stored, verified quote (domain.followup.worker); when
+# there is none, the *_noprice version goes instead. The worker passes every
+# rendered text through the same policy check as Imogen's SMS conversations.
 
 SMS_TEMPLATES: dict[str, str] = {
     # consent request (queued by routing for leads without express written consent)
     "consent_request": (
-        "Hi {first_name}, you recently requested insurance information. "
-        "Reply YES to receive a call about your options. "
-        "Reply STOP to opt out. Msg&Data rates may apply."
+        "Hi {first_name}, this is {agency}. You recently asked for insurance information. "
+        "Reply YES if we may call you about your options. Reply STOP to opt out. Msg&data rates may apply."
     ),
     # missed_call
     "missed_call_immediate": (
-        "Hi {first_name}, this is {agent_name} from Eastwood Insurance — "
-        "I just tried to reach you about your insurance inquiry. "
-        "Is now a better time, or when works for you? Reply STOP to opt out."
+        "Hi {first_name}, this is {agency}. We just tried to call about the insurance information "
+        "you requested. When is a good time, or would you rather text? Reply STOP to opt out."
     ),
     "missed_call_next_day": (
-        "Hi {first_name}, still hoping to connect with you about protecting your family. "
-        "Would you have 5 minutes today or tomorrow? Reply STOP to opt out."
+        "Hi {first_name}, {agency} here, following up on your insurance request. "
+        "Would 5 minutes today or tomorrow work? Reply STOP to opt out."
     ),
 
     # voicemail_left
     "voicemail_sms": (
-        "Hi {first_name}, I just left you a voicemail about your coverage options — "
-        "wanted to follow up in case it's easier to text. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. We left you a voicemail about your coverage request. "
+        "If texting is easier, just reply here. Reply STOP to opt out."
     ),
 
     # interested_busy
     "interested_busy_callback": (
-        "Hi {first_name}, you mentioned you'd have time {callback_window}. "
-        "I'll give you a call then. Just reply here if anything changes. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. You mentioned {callback_window} works, so we will call then. "
+        "Reply here if anything changes. Reply STOP to opt out."
     ),
 
     # quoted_not_closed — figures come from the quote persisted on the call,
-    # never re-computed for the SMS. {quote_label} is "estimate" or
-    # "carrier-backed"; {calendly_link} books time with Ryan directly.
+    # never re-computed for the SMS; {calendly_link} books time with the agent.
     "quoted_followup_day1": (
-        "Hi {first_name}, following up on the option we discussed — "
-        "${face_value} in coverage around ${quote_amount}/month ({quote_label}, {carrier}). "
-        "Ryan, our licensed agent, can finalize it: book a time at {calendly_link} "
-        "or reply here for a callback. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here, following up on the ${face_value} option we discussed: "
+        "${quote_amount}/month ({quote_label}, {carrier}). The next step is a short call with {agent_name}. "
+        "{booking} Reply STOP to opt out."
+    ),
+    "quoted_followup_day1_noprice": (
+        "Hi {first_name}, {agency} here, following up on the coverage options we discussed. "
+        "Exact prices come from a short call with {agent_name}. {booking} Reply STOP to opt out."
     ),
     "quoted_followup_day3": (
-        "Hi {first_name}, just checking back in on the ${face_value} option "
-        "around ${quote_amount}/month ({quote_label}). Grab a time with Ryan at "
-        "{calendly_link} or reply here. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here, checking back on the ${face_value} option at "
+        "${quote_amount}/month ({quote_label}) and a short call with {agent_name}. {booking} "
+        "Reply STOP to opt out."
+    ),
+    "quoted_followup_day3_noprice": (
+        "Hi {first_name}, {agency} here, checking back on the coverage options we discussed and a "
+        "short call with {agent_name}. {booking} Reply STOP to opt out."
     ),
     "quoted_objection_price": (
-        "Hi {first_name}, I hear you on the budget. I found an option closer to your range — "
-        "want me to walk you through it quickly? Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. Understood on the budget. A smaller coverage amount "
+        "costs less. Want {agent_name} to show you what fits? Reply STOP to opt out."
     ),
     "quoted_objection_spouse": (
-        "Hi {first_name}, totally understand wanting to talk it over with your spouse. "
-        "I can set up a call with both of you if that helps — just let me know. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. Totally understand wanting to talk it over with your spouse. "
+        "We can set up a call with both of you. Just let us know. Reply STOP to opt out."
     ),
 
     # no_contact_sequence
     "no_contact_day3": (
-        "Hi {first_name}, I've been trying to reach you about your insurance inquiry. "
-        "If now isn't a good time, when would work? Reply STOP to opt out."
+        "Hi {first_name}, {agency} here about your insurance request. If now is not a good time, "
+        "when would work? Reply STOP to opt out."
     ),
     "no_contact_day7": (
-        "Hi {first_name}, last follow-up from me — just want to make sure you got the "
-        "information you were looking for. Happy to help whenever you're ready. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here with our last follow-up. We wanted to make sure you got "
+        "the information you were looking for. Reply any time. Reply STOP to opt out."
     ),
 
     # application_not_completed
     "app_not_completed_day1": (
-        "Hi {first_name}, your {carrier} application is almost done — "
-        "just needs a few more minutes to finalize. Want me to call you back to complete it? Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. Your {carrier} application is not finished yet. "
+        "Want a call back to complete it? Reply STOP to opt out."
     ),
     "app_not_completed_day3": (
-        "Hi {first_name}, your coverage isn't active yet. Your {carrier} rate of "
-        "${quote_amount}/month is still held — but that won't last. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. Your {carrier} application is still not finished, so the "
+        "coverage is not active yet. Reply here if you would like help. Reply STOP to opt out."
     ),
 
     # payment_failed
     "payment_rescue": (
-        "Hi {first_name}, we had a payment issue with your {carrier} policy. "
-        "Your coverage may lapse — please call us at {office_phone} to resolve. Reply STOP to opt out."
+        "Hi {first_name}, {agency} here. Your {carrier} policy payment did not go through, and the "
+        "coverage can lapse if it is not fixed. Reply here and we will help. Reply STOP to opt out."
     ),
 }
+
+# Templates that state a premium; each has a "<key>_noprice" fallback.
+PRICE_TEMPLATES = frozenset({"quoted_followup_day1", "quoted_followup_day3"})
 
 
 # ── Sequence definitions ──────────────────────────────────────────────────────
@@ -149,8 +165,23 @@ SEQUENCES: dict[str, list[SequenceStep]] = {
 
 
 def render_template(template_key: str, ctx: dict) -> str:
-    template = SMS_TEMPLATES.get(template_key, "Hi {first_name}, following up on your insurance inquiry.")
+    ctx = dict(ctx)
+    if "booking" not in ctx:
+        # With a booking link: offer it; without one (Calendly not configured):
+        # never a dangling "at  or reply here".
+        link = str(ctx.get("calendly_link") or "").strip()
+        ctx["booking"] = f"Book a time at {link} or reply here." if link else "Reply here to pick a time."
+    template = SMS_TEMPLATES.get(
+        template_key, "Hi {first_name}, {agency} here, following up on your insurance request. Reply STOP to opt out.")
     return template.format_map(_SafeDict(ctx))
+
+
+_PLACEHOLDER = re.compile(r"\{[a-z_]+\}")
+
+
+def unfilled_placeholders(body: str) -> list[str]:
+    """Placeholders left in a rendered text (missing context) — never sent."""
+    return _PLACEHOLDER.findall(body)
 
 
 class _SafeDict(dict):

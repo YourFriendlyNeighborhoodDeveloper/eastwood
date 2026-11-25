@@ -116,6 +116,7 @@ interface FetchStub {
   calls: Array<{ url: string; body: Record<string, any> }>;
   failQuote: boolean;
   emptyOptions: boolean;
+  bestWithoutPremium: boolean;
   overBudgetA: boolean;
   calendlyOutcome: "confirmed" | "failed";
   lastQuoteBody(): Record<string, any> | undefined;
@@ -133,6 +134,7 @@ function installFetchStub(): FetchStub {
     calls: [],
     failQuote: false,
     emptyOptions: false,
+    bestWithoutPremium: false,
     overBudgetA: false,
     calendlyOutcome: "confirmed",
     lastQuoteBody: () => [...stub.calls].reverse().find((c) => c.url.endsWith("/api/quote"))?.body,
@@ -140,6 +142,7 @@ function installFetchStub(): FetchStub {
       stub.calls.length = 0;
       stub.failQuote = false;
       stub.emptyOptions = false;
+      stub.bestWithoutPremium = false;
       stub.overBudgetA = false;
       stub.calendlyOutcome = "confirmed";
     },
@@ -157,6 +160,9 @@ function installFetchStub(): FetchStub {
     if (url.endsWith("/api/quote")) {
       if (stub.failQuote) {
         return { ok: false, status: 503, json: async () => ({ detail: "unavailable" }) };
+      }
+      if (stub.bestWithoutPremium) {
+        return ok({ ...estimateLabels(), best: { carrier: null, ...estimateLabels() }, all_options: [], options: [], errors: [] });
       }
       const options = stub.emptyOptions
         ? []
@@ -414,6 +420,29 @@ describe("three-option quote presentation", () => {
     assert.equal(bridge.find("call_ended")!["outcome"], "quote_failed");
     assert.equal(profile.quote_options.length, 0);
     assert.equal(profile.quoted_monthly_premium, null);
+  });
+});
+
+describe("no premium is ever invented", () => {
+  let fetchStub: FetchStub;
+  before(async () => {
+    ({ RealtimeHandler } = await import("../realtime/realtimeHandler.js"));
+    ({ optionsPresentation } = await import("../tools/toolHandlers.js"));
+    fetchStub = installFetchStub();
+  });
+  beforeEach(() => fetchStub.reset());
+  after(() => fetchStub.restore());
+
+  it("a best quote without a premium is a failure, not a default price", async () => {
+    const { socket, bridge } = await startCall();
+    fetchStub.bestWithoutPremium = true;
+    await completeDiscovery(socket);
+    await callTool(socket, "get_quote", QUOTE_ARGS);
+    const result = socket.lastToolResult();
+    assert.ok(result.quoteFailed, "the failure is explicit");
+    assert.match(result.error, /Do NOT state any number/);
+    assert.equal(result.monthlyPremium, undefined, "no default premium");
+    assert.equal(bridge.count("quote_presented"), 0, "nothing was presented");
   });
 });
 

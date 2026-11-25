@@ -33,8 +33,8 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "zip_code": ("zip", "zipcode", "postalcode", "postal", "zip5", "mailingzip"),
     "city": ("city", "town", "mailingcity"),
     "dob": ("dob", "dateofbirth", "birthdate", "birthday"),
+    "sex": ("sex", "gender"),
     "age": ("age", "currentage", "ageatinquiry"),
-    "gender": ("gender", "sex"),
     "product_line": ("product", "productline", "insurancetype", "linetype", "coverage", "coveragetype",
                      "plan", "interest", "productinterest", "leadtype"),
     "source": ("source", "leadsource", "vendor", "origin", "channel", "subsource"),
@@ -153,6 +153,20 @@ class NormalizedRow:
         return any(i.severity == "error" for i in self.issues)
 
 
+def _sex(raw: Any) -> str | None:
+    v = str(raw or "").strip().lower()
+    return "M" if v in ("m", "male", "man") else "F" if v in ("f", "female", "woman") else None
+
+
+def _yes_no(raw: Any) -> bool | None:
+    v = str(raw or "").strip().lower()
+    if v in ("y", "yes", "true", "1", "smoker", "tobacco", "t"):
+        return True
+    if v in ("n", "no", "false", "0", "non-smoker", "nonsmoker", "non-tobacco", "nt", "ns"):
+        return False
+    return None
+
+
 def _cell(value: Any) -> Any:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))  # spreadsheet numbers: 3135550101.0 → "3135550101"
@@ -255,6 +269,8 @@ def normalize_row(
         "consent_url": str(first("consent_url")) if first("consent_url") else None,
         "consent_certificate": str(first("consent_certificate")) if first("consent_certificate") else None,
         "source_dnc": str(dnc_raw).strip().lower() in _TRUTHY if dnc_raw is not None else False,
+        "sex": _sex(first("sex")),
+        "tobacco": _yes_no(first("tobacco")),
         "phone_region": phone_region,
     }
     return out

@@ -163,6 +163,10 @@ class Settings(BaseSettings):
     # Consent older than this many days is quarantined (0 = no age limit).
     consent_max_age_days: int = 0
 
+    # Scanned-PDF rows below this Tesseract confidence are imported quarantined
+    # (ocr_low_confidence) until a human checks them.
+    ocr_min_confidence: float = 85.0
+
     # Third-party enrichment (OpenFEC donor / NPPES provider lookups) sends each
     # lead's name to an external API. Off by default; never used by bulk import.
     enrichment_enabled: bool = False
@@ -197,6 +201,47 @@ class Settings(BaseSettings):
     simulated_callback_base_url: str = "http://nginx"
     # Simulated calls finish after this many seconds (wall clock).
     simulated_call_seconds: float = 2.0
+    # Simulated SMS prospects (scripted personas) answer Imogen's texts through
+    # the signed /twilio/sms webhook. Only with TELEPHONY_PROVIDER=simulated.
+    simulated_sms_prospects: bool = False
+    simulated_sms_reply_seconds: float = 2.0
+
+    # ── Quoting policy ────────────────────────────────────────────────────────
+    # Prospect-facing premiums come only from VERIFIED carrier rate sheets
+    # (domain.quoting.prospect). The formula estimator is internal-only.
+    prospect_quotes_require_verified: bool = True
+    # Synthetic test rate sheets (acceptance testing). Refused in production.
+    allow_test_rate_sheets: bool = False
+
+    # ── SMS-first engine (domain.sms) ─────────────────────────────────────────
+    # How Imogen names the agency in texts (must match how consent names it).
+    agency_display_name: str = "Eastwood Insurance"
+    # How texts refer to the licensed agent who takes the appointment.
+    agent_display_name: str = "our licensed agent"
+    # none = rule-based understanding only (no AI cost); openai = an economical
+    # chat model reads free-text replies the rules cannot (OPENAI_API_KEY).
+    sms_llm_provider: str = "none"
+    sms_llm_model: str = "gpt-5-mini"
+    sms_llm_cost_in_per_m_usd: float = 0.25
+    sms_llm_cost_out_per_m_usd: float = 2.00
+    # Hours after the first text to nudge a lead who never replied.
+    sms_followup_hours: str = "48,120"
+    # Hours after a prospect goes quiet mid-conversation to check back in.
+    sms_stall_hours: str = "24,72"
+    # Appointment reminders, hours before the start time.
+    sms_reminder_hours: str = "24,2"
+    # Answer an inbound text outside 8am-9pm local, or wait for the window.
+    sms_reply_outside_hours: bool = False
+    # Global text sending rate (all campaigns).
+    sms_messages_per_minute: int = 60
+    # Cost guard: after this many texts in one conversation, Imogen stops and
+    # hands the prospect to the agent (a normal booking takes ~10-15).
+    sms_max_outbound_per_conversation: int = 30
+    # Times offered to one prospect are held back from other prospects for
+    # this long, so a campaign burst does not offer everyone the same slots.
+    sms_offer_hold_minutes: int = 15
+    # Twilio inbound price per segment plus a typical inbound carrier fee.
+    cost_sms_inbound_per_segment_usd: float = 0.0100
 
     # ── Licensed agent's own calendar (domain.scheduling.local) ─────────────
     # Weekly availability in the agent's timezone, e.g.
@@ -426,6 +471,12 @@ def assert_production_safety(settings: Settings | None = None) -> None:
         raise UnsafeProductionConfigError(
             "Refusing to start: APP_ENV=production without a positive "
             "OUTBOUND_DAILY_SPEND_LIMIT_USD. Outbound spend must be capped."
+        )
+
+    if s.allow_test_rate_sheets:
+        raise UnsafeProductionConfigError(
+            "Refusing to start: APP_ENV=production with ALLOW_TEST_RATE_SHEETS=true. "
+            "Synthetic rate sheets must never price a real prospect's quote."
         )
 
     if not s.consent_sellers_list():

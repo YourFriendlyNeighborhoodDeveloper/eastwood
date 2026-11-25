@@ -57,9 +57,24 @@ def validate_campaign(data: dict) -> dict:
     if outside:
         raise CampaignError(f"states outside ACTIVE_STATES: {', '.join(outside)}")
     products = [str(x).strip() for x in (data.get("product_lines") or []) if str(x).strip()] or None
+    strategy = str(data.get("channel_strategy") or "sms_first").strip().lower()
+    if strategy not in ("sms_first", "voice_first"):
+        raise CampaignError("channel_strategy must be sms_first or voice_first")
+    if strategy == "sms_first":
+        # Imogen quotes final expense / life by text; Medicare needs a CMS-compliant script.
+        products = [p for p in (products or ["final_expense", "life"]) if p in ("final_expense", "life")] or None
+        if not products:
+            raise CampaignError("sms_first campaigns quote final_expense or life only")
+    mpm = int(data.get("messages_per_minute") or 20)
+    if not 1 <= mpm <= s.sms_messages_per_minute:
+        raise CampaignError(f"messages_per_minute must be 1..{s.sms_messages_per_minute} (SMS_MESSAGES_PER_MINUTE)")
+    cap = data.get("daily_message_cap")
+    cap = int(cap) if cap not in (None, "") else None
     return {"name": name[:128], "budget_usd": budget, "daily_budget_usd": daily,
             "max_concurrent_calls": concurrent, "calls_per_minute": cpm, "states": states,
-            "product_lines": products, "notes": data.get("notes")}
+            "product_lines": products, "notes": data.get("notes"), "channel_strategy": strategy,
+            "messages_per_minute": mpm, "daily_message_cap": cap,
+            "escalate_to_voice": bool(data.get("escalate_to_voice", False))}
 
 
 async def create_campaign(session, data: dict, tenant_id: str) -> Campaign:
@@ -89,6 +104,58 @@ _ELIGIBLE = """
     AND NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.tenant_id = l.tenant_id AND s.phone_e164 = l.phone_e164)
     AND NOT EXISTS (SELECT 1 FROM dial_queue d WHERE d.lead_id = l.id AND d.status IN ('pending', 'dialing'))
 """
+
+
+_SMS_ELIGIBLE = """
+    l.tenant_id = :t
+    AND l.status = ANY(:statuses)
+    AND coalesce((l.contact_authorization->>'sms')::boolean, false)
+    AND l.national_dnc_status IN ('clear', 'exempt')
+    AND l.state = ANY(:states)
+    AND (CAST(:products AS text[]) IS NULL OR coalesce(l.product_line, 'final_expense') = ANY(CAST(:products AS text[])))
+    AND NOT EXISTS (SELECT 1 FROM suppressions s WHERE s.tenant_id = l.tenant_id AND s.phone_e164 = l.phone_e164)
+    AND NOT EXISTS (SELECT 1 FROM sms_conversations c WHERE c.tenant_id = l.tenant_id AND c.lead_id = l.id)
+"""
+
+
+async def enqueue_sms(session, campaign: Campaign, *, limit: int | None = None) -> dict:
+    """SMS-first: open a (pending) conversation for every lead this campaign may
+    text. The engine sends the opener under all gates; nothing is sent here."""
+    params = {"t": campaign.tenant_id, "statuses": list(DIALABLE_SOURCE_STATUSES),
+              "states": campaign.states or [], "products": campaign.product_lines, "cid": campaign.id,
+              "lim": limit if limit and limit > 0 else None}
+    inserted = (await session.execute(text(f"""
+        WITH picked AS (
+            SELECT l.id, l.tenant_id, l.phone_e164 FROM leads l WHERE {_SMS_ELIGIBLE}
+            ORDER BY l.triage_priority DESC NULLS LAST, l.score DESC NULLS LAST, l.acquired_at DESC NULLS LAST
+            LIMIT :lim
+        ), ins AS (
+            INSERT INTO sms_conversations (id, tenant_id, lead_id, campaign_id, phone_e164, status, stage, slots,
+                                           followups_sent, inbound_count, outbound_count, next_action,
+                                           next_action_at, llm_tokens_in, llm_tokens_out, cost_usd,
+                                           created_at, updated_at)
+            SELECT gen_random_uuid(), tenant_id, id, :cid, phone_e164, 'pending', 'outreach', '{{}}'::jsonb,
+                   0, 0, 0, 'outreach', now(), 0, 0, 0, now(), now()
+            FROM picked
+            ON CONFLICT (tenant_id, lead_id) DO NOTHING
+            RETURNING lead_id
+        )
+        UPDATE leads SET status = 'in_conversation', updated_at = now() WHERE id IN (SELECT lead_id FROM ins)
+        RETURNING id
+    """), params)).rowcount
+    blocked = (await session.execute(text("""
+        SELECT CASE
+          WHEN EXISTS (SELECT 1 FROM sms_conversations c WHERE c.lead_id = l.id) THEN 'in_conversation'
+          WHEN NOT coalesce((l.contact_authorization->>'sms')::boolean, false) THEN 'not_authorized_sms'
+          WHEN l.state IS NULL OR NOT (l.state = ANY(:states)) THEN 'outside_campaign_states'
+          WHEN EXISTS (SELECT 1 FROM suppressions s WHERE s.tenant_id = l.tenant_id
+                       AND s.phone_e164 = l.phone_e164) THEN 'suppressed'
+          WHEN l.national_dnc_status NOT IN ('clear','exempt') THEN 'dnc_' || l.national_dnc_status
+          WHEN NOT (l.status = ANY(:statuses)) THEN 'status_' || l.status
+          ELSE 'over_limit_or_product' END AS reason, count(*)
+        FROM leads l WHERE l.tenant_id = :t GROUP BY 1 ORDER BY 2 DESC
+    """), params)).all()
+    return {"channel": "sms", "enqueued": inserted, "breakdown_after_enqueue": {r: n for r, n in blocked}}
 
 
 async def enqueue_leads(session, campaign: Campaign, *, limit: int | None = None) -> dict:
@@ -179,6 +246,10 @@ async def campaign_stats(session, campaign: Campaign) -> dict:
         "id": str(campaign.id),
         "name": campaign.name,
         "status": campaign.status,
+        "channel_strategy": campaign.channel_strategy,
+        "messages_per_minute": campaign.messages_per_minute,
+        "daily_message_cap": campaign.daily_message_cap,
+        "escalate_to_voice": campaign.escalate_to_voice,
         "budget_usd": float(campaign.budget_usd),
         "daily_budget_usd": float(campaign.daily_budget_usd) if campaign.daily_budget_usd is not None else None,
         "spent_usd": round(total_spent, 2),

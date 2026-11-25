@@ -40,6 +40,11 @@ NON_DIALABLE_LEAD_STATUSES = frozenset({
 })
 
 
+# A booked prospect is not dialed again, but its conversation (confirmation,
+# reminders, reschedule) continues by text.
+SMS_CONTINUES_STATUSES = frozenset({"appointment_set", "booked"})
+
+
 async def check_dial_eligibility(session, lead, channel: str = "ai_voice") -> tuple[bool, str]:
     """Every hard gate a lead must pass to be contacted. Shared by retry
     scheduling (Twilio callback), retry execution (process_dial_queue) and the
@@ -60,7 +65,8 @@ async def check_dial_eligibility(session, lead, channel: str = "ai_voice") -> tu
         return False, f"national_dnc:{national}"
 
     lead_status = getattr(lead, "status", "") or ""
-    if lead_status in NON_DIALABLE_LEAD_STATUSES:
+    blocking = NON_DIALABLE_LEAD_STATUSES if channel != "sms" else NON_DIALABLE_LEAD_STATUSES - SMS_CONTINUES_STATUSES
+    if lead_status in blocking:
         return False, f"lead_status:{lead_status}"
 
     auth = getattr(lead, "contact_authorization", None) or {}

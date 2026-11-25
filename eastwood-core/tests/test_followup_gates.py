@@ -49,7 +49,7 @@ def world(monkeypatch):
 
     class _FollowupRepo:
         def __init__(self, s): pass
-        async def get_due(self, now, limit=100):
+        async def get_due(self, now, limit=100, tenant_id=None):
             w.get_due_calls += 1
             return w.tasks
         async def mark_sent(self, task_id): w.statuses[task_id] = "sent"
@@ -238,3 +238,82 @@ async def test_text_over_budget_is_deferred_to_tomorrow_not_sent(world):
     assert await run_due_tasks(sms) == 0
     assert sms.sent == [] and world.spend == []
     assert t.id in world.rescheduled and world.statuses == {}
+
+
+# ── Follow-up text content ────────────────────────────────────────────────────
+
+def test_every_followup_template_is_honest_cheap_and_identifies_the_agency():
+    from domain.followup.sequences import PRICE_TEMPLATES, SMS_TEMPLATES
+    from domain.sms.segments import encoding
+
+    for key, t in SMS_TEMPLATES.items():
+        assert "{agency}" in t, key
+        assert "STOP" in t, key
+        assert "Ryan" not in t and "I just" not in t, key          # never claims to be a person
+        assert "won't last" not in t and "held" not in t, key       # no false urgency
+        assert encoding(t) == "GSM-7", key                          # no em dashes / curly quotes
+    for key in PRICE_TEMPLATES:
+        assert "$" in SMS_TEMPLATES[key] and "$" not in SMS_TEMPLATES[f"{key}_noprice"]
+
+
+def _price_task(quote_id=None):
+    t = _task(template="quoted_followup_day1")
+    t.context_data.update(face_value=15000, quote_amount=82.8, quote_label="estimate", carrier="carrier TBD",
+                          calendly_link="https://cal.example/agent", quote_id=quote_id)
+    return t
+
+
+async def test_unverified_quote_sends_the_no_price_text(world, monkeypatch):
+    import domain.followup.worker as worker
+
+    async def _none(*a):
+        return None
+    monkeypatch.setattr(worker, "_verified_quote", _none)
+    t = _price_task()
+    world.tasks = [t]
+    sms = _Sms()
+
+    assert await run_due_tasks(sms) == 1
+    body = sms.sent[0][1]
+    assert "$" not in body and "82" not in body and "exact prices" in body.lower()
+    assert world.statuses == {t.id: "sent"}
+
+
+async def test_verified_quote_sends_exactly_the_stored_figures(world, monkeypatch):
+    import domain.followup.worker as worker
+
+    stored = SimpleNamespace(monthly_premium=91.05, face_value=2_000_000, carrier="Carrier Life",  # cents
+                             quote_ref="Q1A2B3C")
+
+    async def _verified(session, lead_id, quote_id):
+        assert lead_id == LEAD_ID and quote_id == "qid-1"
+        return stored
+    monkeypatch.setattr(worker, "_verified_quote", _verified)
+    t = _price_task(quote_id="qid-1")
+    world.tasks = [t]
+    sms = _Sms()
+
+    assert await run_due_tasks(sms) == 1
+    body = sms.sent[0][1]
+    # the stored quote wins over whatever the call context carried
+    assert "$20,000" in body and "$91.05/month" in body and "Q1A2B3C" in body and "Carrier Life" in body
+    assert "82.8" not in body and "15000" not in body
+
+
+async def test_text_with_missing_context_is_blocked_not_sent_with_placeholders(world):
+    t = _task(template="app_not_completed_day1")      # needs {carrier}; the task has none
+    world.tasks = [t]
+    sms = _Sms()
+
+    assert await run_due_tasks(sms) == 0
+    assert sms.sent == [] and world.statuses == {t.id: "blocked"}
+
+
+def test_booking_line_reads_well_with_or_without_a_calendar_link():
+    from domain.followup.sequences import render_template
+
+    ctx = {"first_name": "Pat", "agency": "Eastwood Insurance", "agent_name": "our licensed agent"}
+    no_link = render_template("quoted_followup_day1_noprice", {**ctx, "calendly_link": ""})
+    with_link = render_template("quoted_followup_day1_noprice", {**ctx, "calendly_link": "https://cal.example/a"})
+    assert "Reply here to pick a time." in no_link and ":  " not in no_link and " at  " not in no_link
+    assert "Book a time at https://cal.example/a or reply here." in with_link

@@ -13,6 +13,10 @@ Leads_Export_*.csv
 *.local.csv
 data/private/
 exports/private/
+# ...at any depth: eastwood-core writes uploads and registry data to a relative
+# data/private/ (e.g. eastwood-core/data/private/uploads when run from its folder).
+**/data/private/
+**/exports/private/
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 node_modules/

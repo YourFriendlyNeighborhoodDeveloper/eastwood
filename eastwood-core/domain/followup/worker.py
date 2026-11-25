@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +48,9 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
     from domain.dialing import check_dial_eligibility
     from domain.outbound import outbound_permitted, record_contact_decision
     from domain.tcpa import in_tcpa_window, next_tcpa_window_open
+    from domain.sms import policy as sms_policy
     from repos.repos import DialQueueRepo, FollowupRepo, LeadRepo
-    from .sequences import render_template
+    from .sequences import PRICE_TEMPLATES, render_template, unfilled_placeholders
 
     settings = get_settings()
     now = datetime.now(timezone.utc)
@@ -58,7 +61,7 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
         if not permitted:
             # Leave every task pending; nothing prospect-facing goes out.
             return 0
-        tasks = await FollowupRepo(session).get_due(now, limit=100)
+        tasks = await FollowupRepo(session).get_due(now, limit=100, tenant_id=settings.default_tenant_id)
 
     for task in tasks:
         ctx = task.context_data or {}
@@ -127,12 +130,33 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
                     continue
 
                 full_ctx = {
-                    "first_name":    lead.first_name or "there",
-                    "agent_name":    "Ryan",
-                    "office_phone":  "1-800-EASTWOOD",
-                    **ctx,
+                    "first_name": lead.first_name or "there",
+                    "agency":     settings.agency_display_name,
+                    "agent_name": settings.agent_display_name,
+                    **{k: v for k, v in ctx.items() if v is not None},
                 }
+                allowed: set[Decimal] = set()
+                if template_key in PRICE_TEMPLATES:
+                    quote = await _verified_quote(session, lead.id, ctx.get("quote_id"))
+                    if quote is None:
+                        template_key = f"{template_key}_noprice"
+                    else:
+                        face = int(quote.face_value) // 100          # quote_records.face_value is in cents
+                        full_ctx.update(quote_amount=f"{Decimal(str(quote.monthly_premium)):.2f}",
+                                        face_value=f"{face:,}",
+                                        carrier=quote.carrier or full_ctx.get("carrier"),
+                                        quote_label=f"preliminary quote {quote.quote_ref or ''}".strip())
+                        allowed = {Decimal(str(quote.monthly_premium)), Decimal(face)}
                 body = render_template(template_key, full_ctx)
+                problems = sms_policy.validate(body, allowed_amounts=allowed, first_message=False,
+                                               agency=settings.agency_display_name)
+                problems += [f"unfilled:{p}" for p in unfilled_placeholders(body)]
+                if problems:
+                    await followup_repo.mark_status(task.id, "blocked")
+                    record_contact_decision("sms", "blocked")
+                    logger.warning("followup SMS blocked by text policy lead=%s template=%s problems=%s",
+                                   task.lead_id, template_key, problems)
+                    continue
                 from domain import spend as _spend
 
                 campaign_id = await DialQueueRepo(session).last_campaign_for_lead(lead.id)
@@ -158,3 +182,25 @@ async def run_due_tasks(sms_client, ai_agent_client=None) -> int:
                 await followup_repo.mark_failed(task.id)
 
     return processed
+
+
+async def _verified_quote(session, lead_id, quote_id):
+    """The stored quote behind a follow-up's figures, only when it came from a
+    VERIFIED carrier rate sheet (source "rate_sheet"). Estimates and test
+    sheets get the no-price version of the text instead."""
+    if not quote_id:
+        return None
+    from sqlalchemy import select
+
+    from db.models import QuoteRecord
+
+    try:
+        qid = uuid.UUID(str(quote_id))
+    except ValueError:
+        return None
+    q = (await session.execute(
+        select(QuoteRecord).where(QuoteRecord.id == qid, QuoteRecord.lead_id == lead_id)
+    )).scalar_one_or_none()
+    if q is None or q.source != "rate_sheet" or q.monthly_premium is None or q.face_value is None:
+        return None
+    return q

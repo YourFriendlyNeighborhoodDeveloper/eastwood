@@ -227,3 +227,15 @@ def test_canadian_and_caribbean_numbers_are_quarantined():
     assert not a.ai_voice and not a.manual_call and "non_us_number" in a.reasons
     r = normalize_row(2, HEADERS, _row(**{"Other Phone 1": "613-555-0101"}), build_column_map(HEADERS))
     assert r.fields["phone_region"] == "CA"
+
+
+@pytest.mark.parametrize("raw,product", [
+    ("Life Insurance", "life"), ("Term Life", "life"), ("life", "life"), ("Final Expense", "final_expense"),
+    ("FE", "final_expense"), ("Burial insurance", "final_expense"), ("Whole Life", "final_expense"),
+    ("Med Supp", "medicare_supplement"), ("MAPD", "medicare_advantage"), ("Annuity", "annuity"),
+    ("Safe life plan", "life"), ("Coffee", None), ("Vacation", None), ("", None),
+])
+def test_products_match_whole_words_only(raw, product):
+    from domain.normalization import normalize_product
+
+    assert normalize_product(raw) == product

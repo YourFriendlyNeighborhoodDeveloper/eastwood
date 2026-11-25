@@ -25,9 +25,11 @@ def file_sha256(path: Path) -> str:
 
 def detect_format(path: Path) -> str:
     with open(path, "rb") as f:
-        magic = f.read(4)
-    if magic == b"PK\x03\x04":
+        magic = f.read(5)
+    if magic[:4] == b"PK\x03\x04":
         return "xlsx"
+    if magic == b"%PDF-":
+        return "pdf"
     if path.suffix.lower() in (".xls",):
         raise ValueError("Legacy .xls is not supported — save the sheet as .xlsx or .csv")
     return "csv"
@@ -75,9 +77,32 @@ def _xlsx_rows(path: Path) -> tuple[list[str], Iterator[tuple[int, list[Any]]]]:
     return headers, gen()
 
 
+def _pdf_rows(path: Path) -> tuple[list[str], Iterator[tuple[int, list[Any]]]]:
+    from .pdf_reader import extract_pdf
+
+    return pdf_extraction_rows(extract_pdf(path))
+
+
+def pdf_extraction_rows(ex) -> tuple[list[str], Iterator[tuple[int, list[Any]]]]:
+    """Rows of a PdfExtraction, numbered like a spreadsheet; OCR confidence rides
+    along as an extra column the pipeline reads and the preview hides."""
+    headers = list(ex.headers)
+    rows = [list(r) for r in ex.rows]
+    if ex.ocr_confidence:
+        headers.append(OCR_CONFIDENCE_COLUMN)
+        for r, c in zip(rows, ex.ocr_confidence):
+            r.append(str(c))
+    return headers, ((n, r) for n, r in enumerate(rows, start=2))
+
+
+OCR_CONFIDENCE_COLUMN = "_ocr_confidence"
+
+
 def open_rows(path: Path, fmt: str | None = None) -> tuple[str, list[str], Iterator[tuple[int, list[Any]]]]:
     fmt = fmt or detect_format(path)
-    if fmt == "xlsx":
+    if fmt == "pdf":
+        headers, rows = _pdf_rows(path)
+    elif fmt == "xlsx":
         headers, rows = _xlsx_rows(path)
     elif fmt == "csv":
         headers, rows = _csv_rows(path)

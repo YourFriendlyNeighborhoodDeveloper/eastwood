@@ -303,10 +303,25 @@ export const toolHandlers: Record<string, ToolHandler> = {
     }
 
     // ── Single-quote fallback (engine produced no tiered options) ─────────
+    // Only a premium the engine actually returned may be spoken. (This used to
+    // default to $99.00 from "Eastwood Preferred" — a number and a carrier
+    // nobody quoted — whenever `best` lacked them.)
+    const bestPremium = best?.["monthly_premium"];
+    if (typeof bestPremium !== "number" || !(bestPremium > 0)) {
+      session.quoteFailureReason = "no_quotes_available";
+      toolInvocations.inc({ tool_name: "get_quote", outcome: "empty" });
+      return {
+        error:
+          "The quoting service returned no usable premium. Do NOT state any number " +
+          "or range. Offer to book the licensed agent, who will run exact numbers.",
+        quoteFailed: true,
+        nextStep: "book_appointment",
+      };
+    }
     const quote = {
       productLine: parsed.productLine as ProductLine,
-      monthlyPremium: (best?.["monthly_premium"] as number) ?? 99.0,
-      carrier: (best?.["carrier"] as string) ?? "Eastwood Preferred",
+      monthlyPremium: bestPremium,
+      carrier: typeof best?.["carrier"] === "string" ? (best["carrier"] as string) : "",
       faceValue,
       quoteType: quoteType as "estimated" | "carrier",
       rateSource,

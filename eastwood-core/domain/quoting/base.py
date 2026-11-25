@@ -42,6 +42,18 @@ _SOURCE_LABELS: dict[str, dict] = {
         "rate_source":  "cms_api",
         "carrier_rate": True,
     },
+    # Exact premium from a VERIFIED carrier rate sheet (domain.quoting.rate_sheets).
+    "rate_sheet": {
+        "quote_type":   "carrier",
+        "rate_source":  "rate_sheet",
+        "carrier_rate": True,
+    },
+    # Synthetic acceptance-test sheet: computed exactly, but not a carrier's rates.
+    "rate_sheet_test": {
+        "quote_type":   "test",
+        "rate_source":  "rate_sheet_test",
+        "carrier_rate": False,
+    },
 }
 
 # An unrecognised source is treated as an estimate. Failing safe here means a

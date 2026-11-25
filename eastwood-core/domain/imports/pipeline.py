@@ -24,6 +24,7 @@ Nothing here contacts anyone or calls a third-party API.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -42,7 +43,7 @@ from domain.tcpa import supported_states
 
 from .classify import ConsentEvidence, classify
 from .mapping import NormalizedRow, RowIssue, build_column_map, describe_column_map, normalize_row
-from .readers import file_sha256, open_rows
+from .readers import OCR_CONFIDENCE_COLUMN, file_sha256, open_rows
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,9 @@ class ImportOptions:
     column_overrides: dict[str, str] | None = None
     tenant_id: str | None = None
     chunk_size: int = 500
+    # Name to record for the batch (dashboard uploads are stored under their
+    # content hash; this keeps the operator's original file name).
+    file_label: str | None = None
 
 
 @dataclass
@@ -117,8 +121,10 @@ async def run_import(path: Path | str, opts: ImportOptions, *, fail_after_chunks
     tenant_id = opts.tenant_id or settings.default_tenant_id
     started = time.perf_counter()
 
-    sha = file_sha256(path)
-    fmt, headers, rows = open_rows(path)
+    # Hashing and opening run in a worker thread: a scanned PDF is OCR'd here
+    # (seconds per page) and must not stall webhooks or the SMS engine.
+    sha = await asyncio.to_thread(file_sha256, path)
+    fmt, headers, rows = await asyncio.to_thread(open_rows, path)
     mapping = build_column_map(headers, opts.column_overrides)
     if "phone" not in mapping.values():
         raise ImportConfigError(
@@ -146,7 +152,7 @@ async def run_import(path: Path | str, opts: ImportOptions, *, fail_after_chunks
             if batch is None:
                 batch = ImportBatch(
                     tenant_id=tenant_id,
-                    file_name=path.name[:256],
+                    file_name=(opts.file_label or path.name)[:256],
                     file_sha256=sha,
                     file_format=fmt,
                     source_name=opts.source_name[:128],
@@ -176,6 +182,7 @@ async def run_import(path: Path | str, opts: ImportOptions, *, fail_after_chunks
             states=supported_states(),
             headers=headers,
             mapping=mapping,
+            ocr_min_confidence=settings.ocr_min_confidence,
         )
 
         total_rows = 0
@@ -244,6 +251,7 @@ class _ChunkContext:
     states: frozenset[str]
     headers: list[str]
     mapping: dict[int, str]
+    ocr_min_confidence: float = 85.0
 
 
 async def _process_chunk(ctx: _ChunkContext, chunk: list[tuple[int, list[Any]]]) -> None:
@@ -318,6 +326,14 @@ async def _process_chunk(ctx: _ChunkContext, chunk: list[tuple[int, list[Any]]])
                 state=f["state"], supported_states=ctx.states, source_dnc=f["source_dnc"],
                 max_age_days=ctx.max_age_days, now=now, phone_region=f["phone_region"],
             )
+            ocr_conf = r.raw.get(OCR_CONFIDENCE_COLUMN)
+            if ocr_conf is not None and float(ocr_conf) < ctx.ocr_min_confidence:
+                # A misread digit is a stranger: nothing from a low-confidence
+                # scan is contacted until a human has checked it.
+                auth.ai_voice = auth.sms = auth.manual_call = False
+                auth.reasons = list(dict.fromkeys(auth.reasons + ["ocr_low_confidence"]))
+                issue(r.row_number, RowIssue("warning", "low_ocr_confidence", "phone",
+                                             f"OCR confidence {ocr_conf} below {ctx.ocr_min_confidence:g}"))
             acquired_at = f["acquired_at"] or (
                 datetime(ctx.acquisition_date.year, ctx.acquisition_date.month, ctx.acquisition_date.day,
                          tzinfo=timezone.utc) if ctx.acquisition_date else None
@@ -335,6 +351,8 @@ async def _process_chunk(ctx: _ChunkContext, chunk: list[tuple[int, list[Any]]])
                 "state": f["state"],
                 "zip_code": f["zip_code"],
                 "age": f["age"],
+                "sex": f["sex"],
+                "tobacco": f["tobacco"],
                 "product_line": f["product_line"],
                 "source": ctx.source_name,
                 "status": status,

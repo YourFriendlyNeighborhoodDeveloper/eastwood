@@ -34,28 +34,7 @@ logger = logging.getLogger(__name__)
 AWAITING_DNC_CLEARANCE = "awaiting_dnc_clearance"
 
 
-class SlidingWindowRate:
-    """Calls started in the last 60 s, per key (None = global). In-process: after
-    a restart the window is empty, which permits at most one minute's quota."""
-
-    def __init__(self) -> None:
-        from collections import deque
-
-        self._deque = deque
-        self._events: dict = {}
-
-    def _window(self, key, now: datetime):
-        q = self._events.setdefault(key, self._deque())
-        cutoff = now - timedelta(seconds=60)
-        while q and q[0] < cutoff:
-            q.popleft()
-        return q
-
-    def allow(self, key, per_minute: int, now: datetime) -> bool:
-        return len(self._window(key, now)) < max(per_minute, 0)
-
-    def record(self, key, now: datetime) -> None:
-        self._window(key, now).append(now)
+from domain.ratelimit import SlidingWindowRate  # noqa: E402  (re-exported)
 
 
 def mask_phone(phone: str | None) -> str:
@@ -682,6 +661,7 @@ class WorkersBrain:
         face_value = None
         carrier = None
         quote_label = None
+        quote_id = None
         if profile:
             options = [o for o in (profile.get("quote_options") or []) if isinstance(o, dict)]
             selected = profile.get("selected_option")
@@ -693,6 +673,7 @@ class WorkersBrain:
             if chosen:
                 quote_amount = chosen.get("monthly_premium")
                 face_value = chosen.get("face_value")
+                quote_id = chosen.get("quote_id")
                 quote_label = "carrier-backed" if chosen.get("quote_type") == "carrier" else "estimate"
             else:
                 quote_amount = profile.get("quoted_monthly_premium")
@@ -708,6 +689,9 @@ class WorkersBrain:
             "quote_amount":    quote_amount,
             "face_value":      face_value,
             "quote_label":     quote_label or "estimate",
+            # The stored quote behind the figures; the follow-up worker states a
+            # price only when this is a verified rate-sheet quote.
+            "quote_id":        quote_id,
             "carrier":         carrier or msg.get("carrier")
                                or (lead.health_data or {}).get("placed_carrier") or "carrier TBD",
             "calendly_link":   self._settings.calendly_event_type_url,
@@ -810,7 +794,8 @@ class WorkersBrain:
                     record_contact_decision("dial", "calendar_full")
                     return 0
 
-            entries = await dq_repo.get_due(now=now, limit=max(slots * 3, 30))
+            entries = await dq_repo.get_due(now=now, limit=max(slots * 3, 30),
+                                            tenant_id=self._settings.default_tenant_id)
             campaign_ids = {getattr(e, "campaign_id", None) for e in entries} - {None}
             campaigns = {
                 c.id: c for c in (await session.execute(

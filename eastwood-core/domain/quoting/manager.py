@@ -8,7 +8,7 @@ from .base import CarrierQuote, CarrierQuoteAdapter, QuoteRequest, QuoteResponse
 
 logger = logging.getLogger(__name__)
 
-_SOURCE_PRIORITY = {"cms_api": 3, "rate_table": 2, "formula": 1}
+_SOURCE_PRIORITY = {"rate_sheet": 5, "cms_api": 3, "rate_sheet_test": 2.5, "rate_table": 2, "formula": 1}
 
 
 class QuoteManager:

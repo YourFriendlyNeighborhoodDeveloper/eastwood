@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, true, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -475,12 +475,14 @@ class FollowupRepo:
         await self._s.flush()
         return task
 
-    async def get_due(self, now: datetime, limit: int = 50) -> list[FollowupTask]:
+    async def get_due(self, now: datetime, limit: int = 50, tenant_id: str | None = None) -> list[FollowupTask]:
         result = await self._s.execute(
             select(FollowupTask)
             .where(
                 FollowupTask.status == "pending",
                 FollowupTask.fire_at <= now,
+                # only the tenant whose outbound gate was checked
+                (FollowupTask.tenant_id == tenant_id) if tenant_id else true(),
             )
             .order_by(FollowupTask.fire_at)
             .limit(limit)
@@ -569,12 +571,14 @@ class DialQueueRepo:
         )
         return (result.scalar_one() or 0) > 0
 
-    async def get_due(self, now: datetime, limit: int = 10) -> list[DialQueueEntry]:
+    async def get_due(self, now: datetime, limit: int = 10, tenant_id: str | None = None) -> list[DialQueueEntry]:
         result = await self._s.execute(
             select(DialQueueEntry)
             .where(
                 DialQueueEntry.status == "pending",
                 DialQueueEntry.scheduled_at <= now,
+                # only the tenant whose outbound gate was checked
+                (DialQueueEntry.tenant_id == tenant_id) if tenant_id else true(),
                 # Entries of paused / draft / exhausted campaigns are never read,
                 # so they cannot crowd active work out of the batch.
                 or_(

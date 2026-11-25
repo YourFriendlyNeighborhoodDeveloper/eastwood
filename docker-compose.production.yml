@@ -84,6 +84,13 @@ services:
       CONSENT_AUTHORIZED_SELLERS: ${CONSENT_AUTHORIZED_SELLERS:?set CONSENT_AUTHORIZED_SELLERS to your agency name(s) as consent disclosures state them}
       OUTBOUND_DAILY_SPEND_LIMIT_USD: ${OUTBOUND_DAILY_SPEND_LIMIT_USD:?set OUTBOUND_DAILY_SPEND_LIMIT_USD}
       ENRICHMENT_ENABLED: "false"
+      # Prospects see only premiums from verified carrier rate sheets; synthetic
+      # test sheets and scripted SMS personas never run here.
+      PROSPECT_QUOTES_REQUIRE_VERIFIED: "true"
+      ALLOW_TEST_RATE_SHEETS: "false"
+      SIMULATED_SMS_PROSPECTS: "false"
+      # Texts name the agency; it must match how the consent disclosures name it.
+      AGENCY_DISPLAY_NAME: ${AGENCY_DISPLAY_NAME:?set AGENCY_DISPLAY_NAME (your agency name as consent names it)}
 
   ai-agent:
     ports: !override

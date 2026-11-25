@@ -48,6 +48,9 @@ EXACT_ROUTE_POLICIES: dict[str, RoutePolicy] = {
     "/health": RoutePolicy.PUBLIC,
     "/metrics": RoutePolicy.PUBLIC,
     "/api/webhooks/facebook": RoutePolicy.PROVIDER_SIGNED_WEBHOOK,
+    # Static operator page only — it holds no data; every call it makes is an
+    # authenticated /api request. Served on the core port, not via nginx.
+    "/ops": RoutePolicy.PUBLIC,
 }
 
 PREFIX_ROUTE_POLICIES: tuple[tuple[str, RoutePolicy], ...] = (

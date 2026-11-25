@@ -11,12 +11,11 @@ class SmsClient:
         self._client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         self._from_number = settings.twilio_from_number
 
-    def send(self, to: str, body: str) -> str:
-        message = self._client.messages.create(
-            body=body,
-            from_=self._from_number,
-            to=to,
-        )
+    def send(self, to: str, body: str, status_callback: str | None = None) -> str:
+        kwargs: dict = dict(body=body, from_=self._from_number, to=to)
+        if status_callback:
+            kwargs["status_callback"] = status_callback  # delivery receipts -> /twilio/sms-status/{id}
+        message = self._client.messages.create(**kwargs)
         return message.sid
 
     def make_call(self, to: str, twiml_url: str, status_callback_url: str | None = None,

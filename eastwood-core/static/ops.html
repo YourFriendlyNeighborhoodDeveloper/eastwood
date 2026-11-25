@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eastwood Operator</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#5b6470; --line:#dde1e6; --accent:#1f6feb; --bad:#c62828; --ok:#2e7d32; --warn:#b26a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1216; --card:#171b21; --ink:#e7ebf0; --muted:#9aa4b1; --line:#2a3039; --accent:#4c8dff; --bad:#ef5350; --ok:#66bb6a; --warn:#ffb74d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--card); position:sticky; top:0; z-index:2; }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  nav button { background:none; border:0; padding:8px 10px; border-radius:6px; color:var(--muted); cursor:pointer; font:inherit; }
+  nav button.on { background:var(--bg); color:var(--ink); font-weight:600; }
+  main { max-width:1200px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:12px; }
+  .tile { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .tile .v { font-size:22px; font-weight:650; } .tile .k { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; } th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  input, select, textarea { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); }
+  button.b { font:inherit; padding:7px 12px; border-radius:6px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button.s { font:inherit; padding:6px 10px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+  button.danger { background:var(--bad); border-color:var(--bad); color:#fff; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; } .row label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); }
+  .muted { color:var(--muted); } .bad { color:var(--bad); } .ok { color:var(--ok); } .warn { color:var(--warn); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:99px; border:1px solid var(--line); font-size:12px; }
+  .msg { max-width:80%; padding:8px 10px; border-radius:10px; margin:6px 0; white-space:pre-wrap; }
+  .msg.in { background:var(--bg); border:1px solid var(--line); } .msg.out { background:var(--accent); color:#fff; margin-left:auto; }
+  .scroll { overflow-x:auto; } pre { white-space:pre-wrap; margin:0; font-size:12px; }
+  @media (max-width:640px) { main { padding:12px; } .msg { max-width:95%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Eastwood</h1>
+  <nav id="tabs"></nav>
+  <span style="flex:1"></span>
+  <input id="key" type="password" placeholder="API key" autocomplete="off" style="width:200px">
+  <span id="outbound" class="pill">outbound: ?</span>
+</header>
+<main id="view"></main>
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "onclick" || k === "onchange") n[k] = v; else if (v !== undefined && v !== null) n.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) n.append(k instanceof Node ? k : document.createTextNode(k == null ? "" : String(k)));
+  return n;
+}
+const keyBox = $("#key");
+try { keyBox.value = sessionStorage.getItem("ew_key") || ""; } catch (_) {}
+keyBox.onchange = () => { try { sessionStorage.setItem("ew_key", keyBox.value); } catch (_) {} refreshOutbound(); show(current); };
+async function api(path, opts = {}) {
+  const headers = Object.assign({ Authorization: "Bearer " + keyBox.value }, opts.headers || {});
+  if (opts.json !== undefined) { headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(opts.json); }
+  const r = await fetch(path, Object.assign({}, opts, { headers }));
+  const txt = await r.text();
+  let data; try { data = JSON.parse(txt); } catch (_) { data = txt; }
+  if (!r.ok) throw new Error((data && data.detail) ? JSON.stringify(data.detail) : ("HTTP " + r.status));
+  return data;
+}
+const money = (n) => n == null ? "-" : (Number(n) < 0 ? "-$" : "$") + Math.abs(Number(n)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function errorBox(e) { return el("div", { class: "card bad" }, String(e.message || e)); }
+
+async function refreshOutbound() {
+  try { const s = await api("/api/outbound/status"); const p = $("#outbound");
+    p.textContent = "outbound: " + (s.permitted ? "LIVE" : s.reason); p.className = "pill " + (s.permitted ? "ok" : "warn");
+  } catch (_) { $("#outbound").textContent = "outbound: ?"; }
+}
+
+const views = {
+  async Overview(v) {
+    const camps = (await api("/api/campaigns")).campaigns;
+    const sel = el("select", {}, el("option", { value: "" }, "All campaigns"), camps.map(c => el("option", { value: c.id }, c.name)));
+    const box = el("div");
+    const load = async () => {
+      const o = await api("/api/dashboard/overview" + (sel.value ? "?campaign_id=" + sel.value : ""));
+      const t = (k, val) => el("div", { class: "tile" }, el("div", { class: "v" }, val), el("div", { class: "k" }, k));
+      box.replaceChildren(el("div", { class: "tiles" },
+        t("Imported leads", o.imported_leads), t("SMS sent", o.sms_sent), t("Replies", o.replies_received),
+        t("Active conversations", o.active_conversations), t("Qualified prospects", o.qualified_prospects),
+        t("Quotes communicated", o.quotes_communicated), t("Appointments booked", o.appointments_booked),
+        t("Attended", o.appointments_attended), t("Policies sold", o.policies_sold),
+        t("Spend", money(o.spend_usd)), t("Cost / booked appointment", money(o.cost_per_booked_appointment_usd)),
+        t("Commissions", money(o.commissions_usd)), t("Profit", money(o.profit_usd))));
+    };
+    sel.onchange = load;
+    v.append(el("div", { class: "card row" }, el("label", {}, "Campaign", sel), el("button", { class: "s", onclick: load }, "Refresh")), box);
+    await load();
+  },
+
+  async Upload(v) {
+    const file = el("input", { type: "file", accept: ".csv,.xlsx,.pdf" });
+    const out = el("div");
+    let up = null, overrides = {};
+    const renderPreview = (p) => {
+      const fields = ["", ...p.fields];
+      const mapRows = p.headers.map(h => {
+        const s = el("select", {}, fields.map(f => el("option", { value: f || "ignore" }, f || "(ignore)")));
+        s.value = (overrides[h] || p.mapping[h] || "ignore");
+        s.onchange = () => { overrides[h] = s.value; };
+        const sug = (p.suggestions[h] || []).join(", ");
+        return el("tr", {}, el("td", {}, h), el("td", {}, s), el("td", { class: "muted" }, sug ? "maybe: " + sug : ""));
+      });
+      const sample = p.sample.map(r => el("tr", {}, el("td", {}, r.row), el("td", {}, r.phone_e164 || "-"),
+        el("td", {}, [r.first_name, r.last_name].filter(Boolean).join(" ")), el("td", {}, r.state || "-"), el("td", {}, r.age || "-"),
+        el("td", {}, r.product_line || "-"), el("td", {}, r.has_consent_text ? "yes" : "no"),
+        el("td", { class: r.issues.length ? "warn" : "muted" }, r.issues.join(", ") || "ok")));
+      const att = p.needs_attention.map(r => el("tr", {}, el("td", {}, r.row), el("td", { class: "bad" }, r.issues.join(", ")),
+        el("td", {}, el("pre", {}, JSON.stringify(r.raw)))));
+      const form = {
+        source: el("input", { placeholder: "e.g. Lead book from ...", size: 32 }), owner: el("input", { placeholder: "Your agency" }),
+        acquired: el("input", { type: "date" }), auth: el("input", { placeholder: "Written authorization reference", size: 36 }) };
+      const go = el("button", { class: "b", onclick: async () => {
+        try { await api(`/api/imports/uploads/${up.upload_id}/import`, { method: "POST", json: { source: form.source.value,
+          owner: form.owner.value, acquired: form.acquired.value || null, use_authorization: form.auth.value || null, overrides } });
+          pollImports(out); } catch (e) { out.prepend(errorBox(e)); } } }, "Import");
+      out.replaceChildren(
+        el("div", { class: "card" }, el("b", {}, up.file_name), " - ", p.format.toUpperCase(), p.ocr ? " (scanned, read by OCR)" : "",
+          el("div", { class: "muted" }, `${p.rows_scanned} rows checked, ${p.valid_phones} valid phones, `,
+            `${p.duplicate_phones_in_sample} duplicate phones; issues: ${JSON.stringify(p.issue_counts)}`),
+          p.phone_column_found ? "" : el("div", { class: "bad" }, "No phone column recognized - map one below.")),
+        el("div", { class: "card" }, el("b", {}, "Columns"), el("div", { class: "scroll" }, el("table", {},
+          el("tr", {}, el("th", {}, "Column"), el("th", {}, "Read as"), el("th", {}, "")), mapRows)),
+          el("button", { class: "s", onclick: async () => { renderPreview(await api(`/api/imports/uploads/${up.upload_id}/preview`, { method: "POST", json: { overrides } })); } }, "Re-check with these columns")),
+        el("div", { class: "card scroll" }, el("b", {}, "First rows as they will import"), el("table", {},
+          el("tr", {}, ["Row", "Phone", "Name", "State", "Age", "Product", "Consent text", "Issues"].map(h => el("th", {}, h))), sample)),
+        att.length ? el("div", { class: "card scroll" }, el("b", { class: "bad" }, "Rows that need a look"),
+          el("table", {}, el("tr", {}, el("th", {}, "Row"), el("th", {}, "Issue"), el("th", {}, "Original")), att)) : "",
+        el("div", { class: "card row" }, el("label", {}, "Source *", form.source), el("label", {}, "Owner", form.owner),
+          el("label", {}, "Acquired", form.acquired), el("label", {}, "Lead-use authorization (else all quarantined)", form.auth), go));
+    };
+    const send = el("button", { class: "b", onclick: async () => {
+      if (!file.files[0]) return;
+      const fd = new FormData(); fd.append("file", file.files[0]); overrides = {};
+      out.replaceChildren(el("div", { class: "card muted" }, "Reading file..."));
+      try { up = await api("/api/imports/upload", { method: "POST", body: fd }); renderPreview(up.preview); }
+      catch (e) { out.replaceChildren(errorBox(e)); } } }, "Upload & preview");
+    v.append(el("div", { class: "card row" }, el("label", {}, "Lead file (CSV, XLSX or PDF)", file), send), out);
+  },
+
+  async Campaigns(v) {
+    const list = el("div");
+    const f = { name: el("input", { placeholder: "Campaign name" }), budget: el("input", { type: "number", value: "50", style: "width:90px" }),
+      daily: el("input", { type: "number", value: "10", style: "width:80px" }), states: el("input", { value: "MI", size: 12 }),
+      mpm: el("input", { type: "number", value: "20", style: "width:70px" }), cap: el("input", { type: "number", placeholder: "none", style: "width:80px" }),
+      strategy: el("select", {}, el("option", { value: "sms_first" }, "SMS first"), el("option", { value: "voice_first" }, "Voice first")) };
+    const load = async () => {
+      const cs = (await api("/api/campaigns")).campaigns;
+      list.replaceChildren(el("div", { class: "card scroll" }, el("table", {},
+        el("tr", {}, ["Campaign", "Channel", "Status", "Spent / budget", "Queue", ""].map(h => el("th", {}, h))),
+        cs.map(c => el("tr", {}, el("td", {}, c.name), el("td", {}, c.channel_strategy), el("td", {}, c.status),
+          el("td", {}, `${money(c.spent_usd)} / ${money(c.budget_usd)}`), el("td", { class: "muted" }, JSON.stringify(c.queue)),
+          el("td", {}, ["enqueue", "active", "paused", "completed"].map(a => el("button", { class: "s", onclick: async () => {
+            try { if (a === "enqueue") {
+                    const n = prompt("How many leads? Leave blank for every eligible lead.", "");
+                    if (n === null) return;
+                    if (n.trim() && !(Number(n) > 0)) { alert("Enter a positive number, or leave it blank."); return; }
+                    const r = await api(`/api/campaigns/${c.id}/enqueue`, { method: "POST", json: n.trim() ? { limit: Math.floor(Number(n)) } : {} });
+                    alert(`Enqueued ${r.enqueued}`); }
+                  else await api(`/api/campaigns/${c.id}/status`, { method: "POST", json: { status: a } }); load(); }
+            catch (e) { alert(e.message); } } }, a === "enqueue" ? "Enqueue leads" : a === "active" ? "Launch" : a === "paused" ? "Pause" : "Complete"))))))));
+    };
+    const op = el("input", { placeholder: "Your name" }), why = el("input", { placeholder: "Reason", size: 30 });
+    const ob = async (action) => { try { await api("/api/outbound/" + action, { method: "POST", json: { operator: op.value, reason: why.value } }); refreshOutbound(); }
+      catch (e) { alert(e.message); } };
+    v.append(el("div", { class: "card" }, el("b", {}, "New campaign"), el("div", { class: "row" },
+        el("label", {}, "Name", f.name), el("label", {}, "Budget $", f.budget), el("label", {}, "Daily $", f.daily),
+        el("label", {}, "States", f.states), el("label", {}, "Channel", f.strategy), el("label", {}, "Texts/min", f.mpm),
+        el("label", {}, "Daily text cap", f.cap),
+        el("button", { class: "b", onclick: async () => { try { await api("/api/campaigns", { method: "POST", json: {
+          name: f.name.value, budget_usd: Number(f.budget.value), daily_budget_usd: Number(f.daily.value) || null,
+          states: f.states.value.split(",").map(s => s.trim()).filter(Boolean), channel_strategy: f.strategy.value,
+          messages_per_minute: Number(f.mpm.value) || 20, daily_message_cap: f.cap.value ? Number(f.cap.value) : null } }); load(); }
+          catch (e) { alert(e.message); } } }, "Create"))),
+      el("div", { class: "card" }, el("b", {}, "Outbound authorization"), el("div", { class: "muted" },
+        "Nothing is sent unless OUTBOUND_ENABLED=true AND you authorize here. Halt stops everything within seconds."),
+        el("div", { class: "row" }, el("label", {}, "Operator", op), el("label", {}, "Reason", why),
+          el("button", { class: "b", onclick: () => ob("resume") }, "Authorize outbound"),
+          el("button", { class: "b danger", onclick: () => ob("halt") }, "HALT"))), list);
+    await load();
+  },
+
+  async Conversations(v) {
+    const sel = el("select", {}, ["", "contacted", "active", "booked", "waitlist", "declined", "opted_out", "dormant", "handoff"].map(s => el("option", { value: s }, s || "all")));
+    const list = el("div"), detail = el("div");
+    const load = async () => {
+      const cs = (await api("/api/conversations" + (sel.value ? "?status=" + sel.value : ""))).conversations;
+      list.replaceChildren(el("div", { class: "card scroll" }, el("table", {},
+        el("tr", {}, ["Name", "Status", "Waiting for", "In/out", "Cost", ""].map(h => el("th", {}, h))),
+        cs.map(c => el("tr", {}, el("td", {}, c.name), el("td", {}, c.status), el("td", { class: "muted" }, c.expecting || "-"),
+          el("td", {}, `${c.inbound}/${c.outbound}`), el("td", {}, money(c.cost_usd)),
+          el("td", {}, el("button", { class: "s", onclick: async () => {
+            const d = await api("/api/conversations/" + c.id);
+            detail.replaceChildren(el("div", { class: "card" }, el("b", {}, d.lead.name), " ", el("span", { class: "muted" }, d.lead.phone_e164 + " - " + d.status),
+              d.messages.map(m => el("div", { class: "msg " + m.direction }, m.body)),
+              d.quotes.length ? el("div", { class: "muted" }, "Quotes: " + d.quotes.map(q => `${q.quote_ref} ${q.carrier} $${q.face.toLocaleString()} = $${q.monthly_premium}/mo (${q.source})`).join("; ")) : ""));
+          } }, "Open")))))));
+    };
+    sel.onchange = load;
+    v.append(el("div", { class: "card row" }, el("label", {}, "Status", sel)), list, detail);
+    await load();
+  },
+
+  async Appointments(v) {
+    const appts = (await api("/api/appointments?upcoming=true")).appointments;
+    if (!appts.length) { v.append(el("div", { class: "card muted" }, "No upcoming appointments.")); return; }
+    for (const a of appts) {
+      const p = a.profile || {};
+      const prem = el("input", { type: "number", placeholder: "Annual premium", style: "width:130px" });
+      const com = el("input", { type: "number", placeholder: "Commission", style: "width:110px" });
+      const mark = (outcome) => async () => { try { await api(`/api/appointments/${a.appointment_id}/outcome`, { method: "POST",
+        json: { outcome, annual_premium_usd: Number(prem.value) || 0, commission_usd: Number(com.value) || 0, carrier: p.carrier_name } }); show("Appointments"); }
+        catch (e) { alert(e.message); } };
+      v.append(el("div", { class: "card" },
+        el("div", {}, el("b", {}, a.name), " - ", new Date(a.starts_at).toLocaleString(), " - ", a.phone_e164),
+        el("div", { class: "muted" }, p.qualification_summary || ""),
+        el("table", {}, [["Wants", p.desired_coverage_amount ? "$" + Number(p.desired_coverage_amount).toLocaleString() : "-"],
+          ["Quote", p.quote_ref ? `${p.quote_ref}: ${p.carrier_name} $${Number(p.quote_amount).toLocaleString()} at $${p.quoted_monthly_premium}/mo (preliminary)` : "none"],
+          ["Health", p.health_summary || "-"], ["Tobacco", p.tobacco_status || "-"], ["Objections", (p.objections || []).join(", ") || "-"],
+          ["Open questions", (p.unanswered_questions || []).join(" | ") || "-"], ["Next action", p.recommended_next_action || "-"]]
+          .map(([k, val]) => el("tr", {}, el("th", {}, k), el("td", {}, val)))),
+        el("details", {}, el("summary", {}, "Conversation"), el("pre", {}, p.transcript_summary || "")),
+        el("div", { class: "row" }, el("button", { class: "s", onclick: mark("attended") }, "Attended"),
+          el("button", { class: "s", onclick: mark("no_show") }, "No-show"), prem, com, el("button", { class: "b", onclick: mark("sold") }, "Sold"))));
+    }
+  },
+};
+
+let current = "Overview";
+async function show(name) {
+  current = name;
+  for (const b of document.querySelectorAll("#tabs button")) b.className = b.textContent === name ? "on" : "";
+  const v = $("#view"); v.replaceChildren();
+  if (!keyBox.value) { v.append(el("div", { class: "card" }, "Enter the API key (EASTWOOD_API_KEY) at the top right.")); return; }
+  try { await views[name](v); } catch (e) { v.append(errorBox(e)); }
+}
+async function pollImports(out) {
+  const imp = (await api("/api/imports")).imports[0];
+  if (!imp) return;
+  out.prepend(el("div", { class: "card " + (imp.status === "completed" ? "ok" : "muted") },
+    `${imp.file_name}: ${imp.status} - ${imp.inserted} imported, ${imp.authorized_ai_voice} contactable by Imogen, ${imp.quarantined} quarantined`));
+  if (imp.status === "processing") setTimeout(() => pollImports(out), 2000);
+}
+for (const name of Object.keys(views)) $("#tabs").append(el("button", { onclick: () => show(name) }, name));
+refreshOutbound();
+show("Overview");
+</script>
+</body>
+</html>

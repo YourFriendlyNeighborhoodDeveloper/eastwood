@@ -54,8 +54,9 @@ def client(monkeypatch):
         async def commit(self):
             calls.append("commit")
 
-    async def _fake_apply(session, tenant_id, phone, *, note):
+    async def _fake_apply(session, tenant_id, phone, *, note, body=None, provider_sid=None, segments=1):
         calls.append((tenant_id, phone))
+        assert body is not None, "the opt-out text is passed on for the transcript"
         return {"suppressed": True, "newly_suppressed": True, "leads": 1, "cancelled_dials": 1, "cancelled_followups": 2}
 
     async def _override():

@@ -266,3 +266,37 @@ async def test_inventory_campaign_enqueue_and_spend(env, tmp_path):
     assert a["cost_usd"] == pytest.approx(3 * 0.014 + (125 / 60) * (0.15 + 0.006), abs=0.001)
     assert dup is None, "a duplicate callback books nothing"
     assert await _count("SELECT count(*) FROM spend_ledger WHERE tenant_id = :t", t=tenant) == 3
+
+
+async def test_text_pdf_import_keeps_quote_fields(env, tmp_path):
+    from domain.imports import run_import
+    from tests.fixtures.pdfs import COL_X, HEADERS, lead_rows, write_text_pdf
+
+    tenant = env
+    p = write_text_pdf(tmp_path / "list.pdf", [[HEADERS, *lead_rows(12)]], COL_X)
+    r = await run_import(p, _opts(tenant))
+    assert r.status == "completed" and r.inserted == 12 and r.rejected == 0
+    # no consent column in this list: everyone is quarantined, nobody is contactable
+    assert r.authorized_ai_voice == 0 and r.quarantined == 12
+    rows = await _rows("SELECT phone_e164, sex, tobacco FROM leads WHERE tenant_id = :t ORDER BY phone_e164", t=tenant)
+    assert rows[0] == ("+13135550101", "M", False) and rows[2] == ("+13135550103", "M", True)
+
+
+async def test_scanned_pdf_rows_below_ocr_threshold_are_quarantined(env, tmp_path, monkeypatch):
+    import shutil
+
+    import config.settings as cs
+    from domain.imports import run_import
+    from tests.fixtures.pdfs import COL_X, HEADERS, lead_rows, write_scanned_pdf, write_text_pdf
+
+    if shutil.which("tesseract") is None:
+        pytest.skip("tesseract binary not installed")
+    tenant = env
+    monkeypatch.setattr(cs, "_settings", cs.get_settings().model_copy(update={"ocr_min_confidence": 101.0}))
+    src = write_text_pdf(tmp_path / "list.pdf", [[HEADERS, *lead_rows(6)]], COL_X)
+    r = await run_import(write_scanned_pdf(src, tmp_path / "scan.pdf"), _opts(tenant))
+    assert r.status == "completed" and r.inserted == 6
+    assert await _count("SELECT count(*) FROM leads WHERE tenant_id = :t "
+                        "AND quarantine_reasons ? 'ocr_low_confidence'", t=tenant) == 6
+    assert await _count("SELECT count(*) FROM import_errors WHERE batch_id = CAST(:b AS uuid) "
+                        "AND code = 'low_ocr_confidence'", b=r.batch_id) == 6

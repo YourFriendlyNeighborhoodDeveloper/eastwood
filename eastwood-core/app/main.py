@@ -97,6 +97,27 @@ async def lifespan(app: FastAPI):
             # Campaigns on the dial queue; the dialer's hot query
             "ALTER TABLE dial_queue ADD COLUMN IF NOT EXISTS campaign_id UUID",
             "ALTER TABLE dial_queue ADD COLUMN IF NOT EXISTS provider_call_sid VARCHAR(64)",
+            # SMS-first engine, prospect-facing quotes, appointment outcomes
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS sex VARCHAR(1)",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS tobacco BOOLEAN",
+            "ALTER TABLE quote_records ADD COLUMN IF NOT EXISTS quote_ref VARCHAR(16)",
+            "ALTER TABLE quote_records ADD COLUMN IF NOT EXISTS source VARCHAR(32)",
+            "ALTER TABLE quote_records ADD COLUMN IF NOT EXISTS rate_sheet_id UUID",
+            "ALTER TABLE quote_records ADD COLUMN IF NOT EXISTS conversation_id UUID",
+            "ALTER TABLE quote_records ADD COLUMN IF NOT EXISTS communicated_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS ix_quote_records_quote_ref ON quote_records(quote_ref)",
+            "CREATE INDEX IF NOT EXISTS ix_quote_records_conversation_id ON quote_records(conversation_id)",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS channel_strategy VARCHAR(16) NOT NULL DEFAULT 'sms_first'",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS messages_per_minute INTEGER NOT NULL DEFAULT 20",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS daily_message_cap INTEGER",
+            "ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS escalate_to_voice BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS outcome VARCHAR(16)",
+            "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reminders_sent JSONB",
+            # statement time, not transaction start: a prospect's text and the
+            # reply written in the same transaction keep their order
+            "ALTER TABLE sms_messages ALTER COLUMN created_at SET DEFAULT clock_timestamp()",
+            "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS conversation_id UUID",
+            "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ",
             "CREATE INDEX IF NOT EXISTS ix_dial_queue_campaign_id ON dial_queue(campaign_id)",
             "CREATE INDEX IF NOT EXISTS ix_dial_queue_due ON dial_queue(status, scheduled_at, priority DESC)",
             "CREATE INDEX IF NOT EXISTS ix_suppressions_tenant_phone ON suppressions(tenant_id, phone_e164)",
@@ -324,12 +345,29 @@ async def lifespan(app: FastAPI):
                 logger.exception("reaper error")
             await _asyncio.sleep(60)
 
+    # SMS-first engine: outreach, follow-ups, deferred replies, reminders.
+    from domain.sms.engine import SmsEngine
+    sms_engine = SmsEngine(brain._sms)
+    app.state.sms_engine = sms_engine
+
+    async def _sms_loop_wrapped():
+        while True:
+            try:
+                counts = await sms_engine.run_due()
+                if counts and any(k in counts for k in ("sent", "reminders_sent")):
+                    logger.info("sms engine: %s", counts)
+            except Exception:
+                logger.exception("sms engine error")
+            await _asyncio.sleep(5)
+
+    _sms_task = _asyncio.create_task(_sms_loop_wrapped())
     _dial_task = _asyncio.create_task(_dial_loop_wrapped())
     _followup_task = _asyncio.create_task(_followup_loop_wrapped())
     _reaper_task = _asyncio.create_task(_reaper_loop_wrapped())
 
     yield
 
+    _sms_task.cancel()
     _dial_task.cancel()
     _followup_task.cancel()
     _reaper_task.cancel()

@@ -113,8 +113,33 @@ class _FakeRequest:
         return self._payload
 
 
-async def test_api_quote_response_labels_every_option_as_an_estimate():
+def _legacy_estimates(monkeypatch):
+    import config.settings as cs
+
+    monkeypatch.setattr(cs, "_settings", cs.get_settings().model_copy(
+        update={"prospect_quotes_require_verified": False}))
+
+
+async def test_by_default_no_premium_without_a_verified_rate_sheet():
+    """The prospect-facing default: no verified sheet / unknown lead → no number."""
     from api.routes import get_quote
+
+    class _NoLeadSession(_FakeSession):
+        async def get(self, *a, **k):
+            return None
+
+    payload = await get_quote(_FakeRequest({"lead_id": str(uuid.uuid4()), "product_line": "final_expense",
+                                            "age": 68, "state": "MI", "tobacco": False}), _NoLeadSession())
+    assert payload["quote_policy"] == "verified_rate_sheets_only"
+    assert payload["options"] == [] and payload["best"] is None and payload["all_options"] == []
+    assert payload["unavailable_reasons"]
+
+
+async def test_api_quote_response_labels_every_option_as_an_estimate(monkeypatch):
+    """Legacy estimator path (PROSPECT_QUOTES_REQUIRE_VERIFIED=false)."""
+    from api.routes import get_quote
+
+    _legacy_estimates(monkeypatch)
 
     body = {
         "lead_id": str(uuid.uuid4()),
