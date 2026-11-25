@@ -43,3 +43,14 @@ def test_each_guard_refuses():
 def test_refusals_explain_themselves():
     problems = _check(_s(default_tenant_id="default"), tenant_phones={TO, "+13135550188"})
     assert any("live-test" in p for p in problems) and any("1 other lead" in p for p in problems)
+
+
+def test_no_verified_quote_refuses_unless_the_no_price_path_is_chosen():
+    reasons = ["no verified, effective rate sheet for final_expense"]
+    problems = _check(quote_reasons=reasons)
+    assert any("no verified carrier rate sheet" in p for p in problems)
+    assert _check(quote_reasons=reasons, no_quote_ok=True) == []
+
+
+def test_a_full_calendar_refuses():
+    assert any("no open slot" in p for p in _check(open_slot=False))

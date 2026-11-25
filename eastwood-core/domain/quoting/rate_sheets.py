@@ -6,9 +6,17 @@ states it is sold in, its effective dates, its annual policy fee and its
 payment-mode (modal) factors. Premiums are computed exactly as a carrier rate
 book specifies:
 
-  per_1000_annual   annual = rate x face / 1000 + policy fee
-                    modal  = annual x modal factor[mode]
-  flat_monthly      the sheet lists the monthly premium per face amount
+  per_1000_annual   annual = rate x face / 1000 + annual policy fee
+                    modal  = annual x modal factor[mode]   (monthly factor e.g. 0.0875)
+  per_1000_monthly  monthly = rate x face / 1000 + monthly policy fee
+                    modal   = monthly x modal factor[mode]  (monthly factor 1)
+  flat_monthly      the sheet lists the monthly premium for each face amount
+  flat_annual       the sheet lists the annual premium for each face amount;
+                    modal = annual x modal factor[mode]
+
+A "flat" (grid) sheet quotes only the face amounts printed in it; a per-$1,000
+sheet quotes any face between its limits in its increment. Every quote is for
+a payment mode the sheet defines a factor for (SMS quotes are monthly).
 
 with Decimal arithmetic and the sheet's rounding convention ("final": round the
 modal premium once; "annual_then_modal": round the annual premium, then the
@@ -37,7 +45,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from db.models import RateSheet, RateSheetRate
 from domain.tcpa import supported_states
 
-RATE_UNITS = ("per_1000_annual", "flat_monthly")
+RATE_UNITS = ("per_1000_annual", "per_1000_monthly", "flat_monthly", "flat_annual")
+GRID_UNITS = ("flat_monthly", "flat_annual")          # premiums listed per face amount
+MONTHLY_BASED = ("per_1000_monthly", "flat_monthly")  # figures are already monthly
 ROUNDING = ("final", "annual_then_modal")
 CENT = Decimal("0.01")
 _TRUE = {"y", "yes", "true", "t", "1", "tobacco", "smoker", "s", "tob"}
@@ -69,14 +79,20 @@ def parse_sex(raw) -> str:
 
 
 def compute_premium(*, rate_unit: str, rate: Decimal, face: int, policy_fee_annual: Decimal,
-                    modal_factor: Decimal, rounding: str = "final") -> Decimal:
+                    modal_factor: Decimal, rounding: str = "final",
+                    policy_fee_monthly: Decimal = Decimal(0)) -> Decimal:
     if rate_unit == "per_1000_annual":
         annual = rate * Decimal(face) / Decimal(1000) + policy_fee_annual
         if rounding == "annual_then_modal":
             annual = money(annual)
         return money(annual * modal_factor)
-    if rate_unit == "flat_monthly":
-        return money(rate)
+    if rate_unit == "per_1000_monthly":
+        monthly = rate * Decimal(face) / Decimal(1000) + policy_fee_monthly
+        if rounding == "annual_then_modal":      # i.e. round the base (monthly) premium first
+            monthly = money(monthly)
+        return money(monthly * modal_factor)
+    if rate_unit in GRID_UNITS:
+        return money(rate * modal_factor)
     raise RateSheetError(f"unknown rate unit {rate_unit!r}")
 
 
@@ -111,8 +127,20 @@ def _validate_meta(meta: dict) -> dict:
                 raise RateSheetError(f"modal factor for {mode} must be positive")
         except InvalidOperation:
             raise RateSheetError(f"modal factor for {mode} is not a number") from None
-    if "monthly" not in factors and meta["rate_unit"] == "per_1000_annual":
+    if "monthly" not in factors:
         raise RateSheetError("modal_factors must include 'monthly' (the SMS quote mode)")
+    if meta["rate_unit"] in MONTHLY_BASED and Decimal(str(factors["monthly"])) != 1:
+        raise RateSheetError(f"{meta['rate_unit']} figures are monthly already: the monthly modal factor must be 1")
+    fee_a = Decimal(str(meta.get("policy_fee_annual") or 0))
+    fee_m = Decimal(str(meta.get("policy_fee_monthly") or 0))
+    if fee_a < 0 or fee_m < 0:
+        raise RateSheetError("policy fees cannot be negative")
+    if meta["rate_unit"] in GRID_UNITS and (fee_a or fee_m):
+        raise RateSheetError("a premium grid already includes the policy fee: set policy fees to 0")
+    if meta["rate_unit"] == "per_1000_annual" and fee_m:
+        raise RateSheetError("per_1000_annual sheets take an annual policy fee (policy_fee_annual)")
+    if meta["rate_unit"] == "per_1000_monthly" and fee_a:
+        raise RateSheetError("per_1000_monthly sheets take a monthly policy fee (policy_fee_monthly)")
     eff = date.fromisoformat(str(meta["effective_date"]))
     exp = date.fromisoformat(str(meta["expires_date"])) if meta.get("expires_date") else None
     if exp and exp <= eff:
@@ -130,7 +158,7 @@ def _validate_meta(meta: dict) -> dict:
         "carrier": str(meta["carrier"])[:128], "product_line": str(meta["product_line"]),
         "plan_name": str(meta["plan_name"])[:128], "states": states, "effective_date": eff,
         "expires_date": exp, "rate_unit": meta["rate_unit"],
-        "policy_fee_annual": Decimal(str(meta.get("policy_fee_annual", 0))),
+        "policy_fee_annual": fee_a, "policy_fee_monthly": fee_m,
         "modal_factors": {**factors, "_rounding": rounding}, "min_face": min_face, "max_face": max_face,
         "face_increment": inc, "default_tier": str(meta.get("default_tier", "level")).lower(),
         "tier_questions": questions, "source_document": str(meta["source_document"]),
@@ -153,8 +181,10 @@ def read_rate_rows(csv_path: Path, rate_unit: str) -> list[dict]:
                 raise RateSheetError(f"row {n}: {exc}") from None
             if not 0 < age < 120 or rate <= 0:
                 raise RateSheetError(f"row {n}: age must be 1-119 and rate positive")
-            if rate_unit == "flat_monthly" and face <= 0:
-                raise RateSheetError(f"row {n}: flat_monthly sheets need a face column")
+            if rate_unit in GRID_UNITS and face <= 0:
+                raise RateSheetError(f"row {n}: {rate_unit} sheets need a face column")
+            if rate_unit not in GRID_UNITS and face:
+                raise RateSheetError(f"row {n}: per-$1,000 rates take no face column")
             key = (age, sex, tob, tier, face)
             if key in seen:
                 raise RateSheetError(f"row {n}: duplicate cell {key}")
@@ -213,6 +243,30 @@ class SheetQuote:
         }
 
 
+async def grid_faces(session, sheet_id) -> list[int]:
+    """The face amounts a premium-grid sheet actually lists."""
+    return sorted(f for (f,) in (await session.execute(
+        select(RateSheetRate.face).where(RateSheetRate.sheet_id == sheet_id).distinct())).all() if f)
+
+
+async def available_faces(session, *, tenant_id: str, product_line: str, state: str | None,
+                          today: date | None = None, allow_test: bool = False) -> list[int]:
+    """Every face amount some verified, effective sheet sold in `state` can quote:
+    the printed faces of grid sheets and min..max by increment of per-$1,000
+    sheets. Prospect options are chosen from these, never between them."""
+    today = today or datetime.now(timezone.utc).date()
+    faces: set[int] = set()
+    for s in await _candidate_sheets(session, tenant_id=tenant_id, product_line=product_line, today=today,
+                                     allow_test=allow_test):
+        if state not in (s.states or []):
+            continue
+        if s.rate_unit in GRID_UNITS:
+            faces.update(await grid_faces(session, s.id))
+        else:
+            faces.update(range(s.min_face, s.max_face + 1, s.face_increment))
+    return sorted(faces)
+
+
 async def _candidate_sheets(session, *, tenant_id: str, product_line: str, today: date, allow_test: bool):
     q = select(RateSheet).where(
         RateSheet.tenant_id == tenant_id, RateSheet.product_line == product_line,
@@ -244,12 +298,18 @@ async def quote_from_sheets(session, *, tenant_id: str, product_line: str, state
         if state not in (s.states or []):
             reasons.append(f"{label}: not sold in {state}")
             continue
-        if not s.min_face <= face <= s.max_face or (face - s.min_face) % s.face_increment:
+        if s.rate_unit in GRID_UNITS:
+            grid = await grid_faces(session, s.id)
+            if face not in grid:
+                shown = ", ".join(f"${f:,}" for f in grid[:8]) + (" ..." if len(grid) > 8 else "")
+                reasons.append(f"{label}: face ${face:,} is not in the rate table ({shown})")
+                continue
+        elif not s.min_face <= face <= s.max_face or (face - s.min_face) % s.face_increment:
             reasons.append(f"{label}: face ${face:,} outside ${s.min_face:,}-${s.max_face:,} "
                            f"in ${s.face_increment:,} steps")
             continue
         use_tier = (tier or s.default_tier).lower()
-        cell_face = face if s.rate_unit == "flat_monthly" else 0
+        cell_face = face if s.rate_unit in GRID_UNITS else 0
         q = select(RateSheetRate).where(
             RateSheetRate.sheet_id == s.id, RateSheetRate.age == age, RateSheetRate.tobacco == tobacco,
             RateSheetRate.tier == use_tier, RateSheetRate.face == cell_face,
@@ -266,13 +326,14 @@ async def quote_from_sheets(session, *, tenant_id: str, product_line: str, state
                                f"tier {use_tier} (sheet ages {span[0]}-{span[1]})")
             continue
         factors = s.modal_factors or {}
-        if s.rate_unit == "per_1000_annual" and mode not in factors:
+        if mode not in factors or mode.startswith("_"):
             reasons.append(f"{label}: no modal factor for {mode}")
             continue
-        factor = Decimal(str(factors.get(mode, 1)))
+        factor = Decimal(str(factors[mode]))
         premium = compute_premium(rate_unit=s.rate_unit, rate=Decimal(str(cell.rate)), face=face,
                                   policy_fee_annual=Decimal(str(s.policy_fee_annual)), modal_factor=factor,
-                                  rounding=_meta_rounding(s))
+                                  rounding=_meta_rounding(s),
+                                  policy_fee_monthly=Decimal(str(getattr(s, "policy_fee_monthly", 0) or 0)))
         out.append(SheetQuote(
             sheet_id=str(s.id), carrier=s.carrier, plan_name=s.plan_name, product_line=s.product_line,
             effective_date=s.effective_date.isoformat(),
@@ -304,6 +365,21 @@ async def verify_rate_sheet(session, sheet_id, *, checks: list[dict], verified_b
         raise RateSheetError("verified_by is required")
     if len(checks) < MIN_CHECKS:
         raise RateSheetError(f"at least {MIN_CHECKS} spot checks from the carrier's own quote tool are required")
+    # Every rate class the sheet holds must be checked at least once: an
+    # extraction slip (a shifted column, a mislabelled table) shows up in the
+    # class it affected, so a class nobody checked is a class nobody verified.
+    present = (await session.execute(select(RateSheetRate.sex, RateSheetRate.tobacco, RateSheetRate.tier)
+                                     .where(RateSheetRate.sheet_id == sheet.id).distinct())).all()
+    covered = set()
+    for c in checks:
+        c_tier = str(c.get("tier") or sheet.default_tier).lower()
+        c_tob = parse_tobacco(c["tobacco"])
+        c_sex = parse_sex(c.get("sex", "U"))
+        covered |= {(sx, c_tob, c_tier) for sx in (c_sex, "U")}
+    uncovered = sorted(f"{sx} {'tobacco' if tb else 'non-tobacco'} {tr}" for sx, tb, tr in present
+                       if (sx, tb, tr) not in covered)
+    if uncovered:
+        raise RateSheetError("spot checks must cover every rate class; add a check for: " + "; ".join(uncovered))
     results, ok = [], True
     for c in checks:
         tob = parse_tobacco(c["tobacco"])
@@ -312,19 +388,20 @@ async def verify_rate_sheet(session, sheet_id, *, checks: list[dict], verified_b
         mode = str(c.get("mode", "monthly"))
         expected = money(Decimal(str(c["expected"]).replace("$", "").replace(",", "")))
         tier = str(c.get("tier") or sheet.default_tier).lower()
-        cell_face = face if sheet.rate_unit == "flat_monthly" else 0
+        cell_face = face if sheet.rate_unit in GRID_UNITS else 0
         rows = {r.sex: r for r in (await session.execute(select(RateSheetRate).where(
             RateSheetRate.sheet_id == sheet.id, RateSheetRate.age == int(c["age"]),
             RateSheetRate.tobacco == tob, RateSheetRate.tier == tier, RateSheetRate.face == cell_face,
         ))).scalars()}
         cell = rows.get(sex) or rows.get("U")
-        if cell is None or (sheet.rate_unit == "per_1000_annual" and mode not in (sheet.modal_factors or {})):
+        if cell is None or mode not in (sheet.modal_factors or {}) or mode.startswith("_"):
             got, match = None, False
         else:
             got = compute_premium(rate_unit=sheet.rate_unit, rate=Decimal(str(cell.rate)), face=face,
                                   policy_fee_annual=Decimal(str(sheet.policy_fee_annual)),
-                                  modal_factor=Decimal(str((sheet.modal_factors or {}).get(mode, 1))),
-                                  rounding=_meta_rounding(sheet))
+                                  modal_factor=Decimal(str(sheet.modal_factors[mode])),
+                                  rounding=_meta_rounding(sheet),
+                                  policy_fee_monthly=Decimal(str(getattr(sheet, "policy_fee_monthly", 0) or 0)))
             match = got == expected
         ok &= match
         results.append({"age": int(c["age"]), "sex": sex, "tobacco": tob, "tier": tier, "face": face,

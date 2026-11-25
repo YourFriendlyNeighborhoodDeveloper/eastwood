@@ -103,6 +103,9 @@ services:
       - "18080:8080"
     environment:
       APP_ENV: ${APP_ENV:-development}
+      # Which tenant this deployment works (rate sheets, leads, campaigns and
+      # conversations are all per tenant). The controlled live test uses its own.
+      DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-default}
       DATABASE_URL: postgresql+asyncpg://eastwood:eastwood@postgres:5432/eastwood
       KAFKA_BROKERS: kafka:9092
       REDIS_URL: redis://redis:6379

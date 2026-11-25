@@ -116,6 +116,7 @@ async def lifespan(app: FastAPI):
             # statement time, not transaction start: a prospect's text and the
             # reply written in the same transaction keep their order
             "ALTER TABLE sms_messages ALTER COLUMN created_at SET DEFAULT clock_timestamp()",
+            "ALTER TABLE rate_sheets ADD COLUMN IF NOT EXISTS policy_fee_monthly NUMERIC(10,2) NOT NULL DEFAULT 0",
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS conversation_id UUID",
             "ALTER TABLE appointments ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMPTZ",
             "CREATE INDEX IF NOT EXISTS ix_dial_queue_campaign_id ON dial_queue(campaign_id)",

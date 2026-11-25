@@ -40,7 +40,9 @@ def write_text_pdf(path: Path, pages: list[list[list[str]]], col_x: list[float],
         ops += ["BT", f"/F1 {font_size} Tf"]
         y = top
         for row in rows:
-            for x, cell in zip(col_x, row):
+            # a row is either cells at the column positions, or explicit (x, text) pairs
+            placed = row if row and isinstance(row[0], tuple) else list(zip(col_x, row))
+            for x, cell in placed:
                 ops.append(f"1 0 0 1 {x} {y} Tm ({_esc(cell)}) Tj")
             y -= line_gap
         ops.append("ET")

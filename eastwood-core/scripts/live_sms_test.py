@@ -11,6 +11,10 @@ texts through Twilio, so it refuses to start unless every guard below holds:
   * the recipient is named twice: --to and the LIVE_TEST_RECIPIENT environment
     variable must match, and you type its last four digits to confirm
   * hard caps: a $5 campaign budget, 25 texts a day, 5 texts a minute
+  * an accurate quote is possible: a VERIFIED carrier rate sheet (not a test
+    sheet) prices the recipient's age, state and product — unless
+    --no-quote-ok, which tests the honest "no price by text" path instead
+  * the agent's calendar has an open slot to book
 
 The lead goes through the real import pipeline (consent, DNC scrub,
 qualification), so the test exercises the same gates as a real campaign. When
@@ -29,7 +33,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -39,8 +43,10 @@ DAILY_MESSAGE_CAP = 25
 MESSAGES_PER_MINUTE = 5
 
 
-def preflight(s, *, to: str, env_recipient: str, tenant_phones: set[str], other_active_campaigns: int) -> list[str]:
-    """Every reason not to start. Empty list = all guards hold."""
+def preflight(s, *, to: str, env_recipient: str, tenant_phones: set[str], other_active_campaigns: int,
+              quote_reasons: list[str] | None = None, open_slot: bool = True, no_quote_ok: bool = False) -> list[str]:
+    """Every reason not to start. Empty list = all guards hold.
+    quote_reasons: None when a verified sheet prices the recipient, else why not."""
     problems = []
     if s.telephony_provider.strip().lower() != "twilio":
         problems.append("TELEPHONY_PROVIDER must be twilio (this is the live test)")
@@ -63,6 +69,12 @@ def preflight(s, *, to: str, env_recipient: str, tenant_phones: set[str], other_
         problems.append(f"the live-test tenant holds {len(others)} other lead(s); it must hold only the recipient")
     if other_active_campaigns:
         problems.append(f"{other_active_campaigns} other campaign(s) are active in this tenant")
+    if quote_reasons is not None and not no_quote_ok:
+        problems.append("no verified carrier rate sheet can price the recipient ("
+                        + "; ".join(quote_reasons[:3]) + "): load and verify the carrier's rate book "
+                        "(docs/operator-runbook.md, section 3), or pass --no-quote-ok to test the no-price path")
+    if not open_slot:
+        problems.append("the agent's calendar (AGENT_AVAILABILITY) has no open slot to book")
     return problems
 
 
@@ -92,6 +104,22 @@ async def _counts(session, tenant: str) -> tuple[set[str], int]:
     return phones, int(active)
 
 
+async def _quote_check(db, s, a) -> tuple[list[str] | None, bool]:
+    """(None if a verified, non-test sheet prices the recipient else the reasons, calendar has a slot)."""
+    from domain.quoting.rate_sheets import quote_from_sheets
+    from domain.scheduling.local import LocalCalendar
+
+    born = date.fromisoformat(a.dob)
+    today = date.today()
+    age = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    quotes, reasons = await quote_from_sheets(
+        db, tenant_id=s.default_tenant_id, product_line="final_expense", state=a.state, age=age,
+        sex=a.sex or "F", tobacco=(a.tobacco == "Yes") if a.tobacco else False, face=a.face, allow_test=False)
+    cal = LocalCalendar.from_settings(s)
+    slot = bool(cal) and bool(await cal.available_times(db, s.default_tenant_id, limit=1))
+    return (None if quotes else (reasons or ["no quote"])), slot
+
+
 async def run(a) -> int:
     from sqlalchemy import select
 
@@ -102,12 +130,16 @@ async def run(a) -> int:
     s = get_settings()
     async with session_scope() as db:
         phones, active = await _counts(db, s.default_tenant_id)
+        quote_reasons, open_slot = await _quote_check(db, s, a)
     problems = preflight(s, to=a.to, env_recipient=os.environ.get("LIVE_TEST_RECIPIENT", ""),
-                         tenant_phones=phones, other_active_campaigns=active)
+                         tenant_phones=phones, other_active_campaigns=active, quote_reasons=quote_reasons,
+                         open_slot=open_slot, no_quote_ok=a.no_quote_ok)
     plan = {"recipient": a.to, "tenant": s.default_tenant_id, "agency": s.agency_display_name,
             "budget_usd": BUDGET_USD, "daily_message_cap": DAILY_MESSAGE_CAP, "messages_per_minute": MESSAGES_PER_MINUTE,
             "time_limit_minutes": a.minutes, "verified_rate_sheets_required": s.prospect_quotes_require_verified,
-            "test_rate_sheets_allowed": s.allow_test_rate_sheets}
+            "test_rate_sheets_allowed": s.allow_test_rate_sheets,
+            "quote": "a verified carrier rate sheet prices the recipient" if quote_reasons is None
+            else f"NO verified quote ({'; '.join(quote_reasons[:2])})", "open_slot": open_slot}
     print(json.dumps({"plan": plan, "refusals": problems}, indent=2))
     if problems:
         print("REFUSED: fix the items above. Nothing was sent.")
@@ -194,6 +226,9 @@ def main(argv=None) -> int:
     ap.add_argument("--operator", required=True, help="who authorizes and watches the test")
     ap.add_argument("--consent-text", help="the recipient's own written consent (default: a test consent naming the agency)")
     ap.add_argument("--minutes", type=int, default=30)
+    ap.add_argument("--face", type=int, default=10000, help="coverage amount the preflight prices (default 10000)")
+    ap.add_argument("--no-quote-ok", action="store_true",
+                    help="run without a verified rate sheet (tests the honest no-price path, not the milestone)")
     ap.add_argument("--dry-run", action="store_true", help="check the guards only")
     ap.add_argument("--yes", action="store_true", help="skip the typed confirmation (guards still apply)")
     a = ap.parse_args(argv)

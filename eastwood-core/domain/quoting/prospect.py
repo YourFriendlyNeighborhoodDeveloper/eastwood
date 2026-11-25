@@ -26,7 +26,7 @@ from decimal import Decimal
 from config.settings import get_settings
 from db.models import QuoteRecord
 
-from .rate_sheets import SheetQuote, quote_from_sheets
+from .rate_sheets import SheetQuote, available_faces, quote_from_sheets
 
 DEFAULT_NEED = {"burial": 15_000, "cremation": 10_000}
 GENERIC_NEED = 10_000
@@ -96,7 +96,18 @@ async def quote_for_prospect(session, *, tenant_id: str, lead_id, conversation_i
             tobacco=tobacco, face=face, tier=tier, mode=mode, today=today, allow_test=allow_test)
         return (quotes[0] if quotes else None), reasons
 
-    c_face = _round_up(need_face(desired_face, purpose))
+    # Options are drawn only from face amounts a verified sheet actually quotes
+    # (a premium grid lists e.g. $5,000 / $10,000 / $15,000 ...): the smallest
+    # offered amount that covers the need, then the next offered amounts up.
+    offered = await available_faces(session, tenant_id=tenant_id, product_line=product_line, state=state,
+                                    today=today, allow_test=allow_test)
+
+    def snap(face: int) -> int:
+        if not offered:
+            return face
+        return next((f for f in offered if f >= face), offered[-1])
+
+    c_face = snap(_round_up(need_face(desired_face, purpose)))
     if max_face_cap:
         c_face = min(c_face, max_face_cap)
     c, reasons = await best(c_face)
@@ -105,26 +116,26 @@ async def quote_for_prospect(session, *, tenant_id: str, lead_id, conversation_i
             return QuoteResult(missing=["sex"], unavailable_reasons=reasons)
         return QuoteResult(unavailable_reasons=reasons)
 
-    faces = {"C": c_face, "B": c_face + STEP}
+    faces = {"C": c_face, "B": snap(c_face + STEP)}
     chosen: dict[str, SheetQuote] = {"C": c}
-    b, _ = await best(faces["B"])
+    b, _ = await best(faces["B"]) if faces["B"] > c_face else (None, [])
     if b:
         chosen["B"] = b
     budget = Decimal(str(monthly_budget)) if monthly_budget else None
     if budget:
-        # A: the largest face whose exact premium fits the stated budget.
-        face, last_ok = c_face, None
-        while face <= c_face + 10 * STEP:
+        # A: the largest offered face whose exact premium fits the stated budget.
+        last_ok = None
+        for face in sorted({snap(c_face + k * STEP) for k in range(11)}):
             q, _ = await best(face)
             if q is None:
                 break
             if q.premium <= budget:
                 last_ok = q
-            face += STEP
         if last_ok and last_ok.face > max(q.face for q in chosen.values()):
             chosen["A"] = last_ok
     else:
-        a, _ = await best(c_face + 2 * STEP)
+        a_face = snap(c_face + 2 * STEP)
+        a, _ = await best(a_face) if a_face > faces["B"] else (None, [])
         if a:
             chosen["A"] = a
 

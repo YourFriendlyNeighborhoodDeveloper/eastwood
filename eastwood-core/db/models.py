@@ -539,9 +539,10 @@ class RateSheet(Base):
     states: Mapped[list] = mapped_column(JSONB, nullable=False)            # USPS codes where sold
     effective_date: Mapped[datetime] = mapped_column(Date, nullable=False)
     expires_date: Mapped[datetime | None] = mapped_column(Date)
-    rate_unit: Mapped[str] = mapped_column(String(24), nullable=False)      # per_1000_annual | flat_monthly
+    rate_unit: Mapped[str] = mapped_column(String(24), nullable=False)      # see quoting.rate_sheets.RATE_UNITS
     policy_fee_annual: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)
-    modal_factors: Mapped[dict] = mapped_column(JSONB, nullable=False)     # mode -> factor on annual premium
+    policy_fee_monthly: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=0)  # per_1000_monthly
+    modal_factors: Mapped[dict] = mapped_column(JSONB, nullable=False)     # mode -> factor on the base premium
     min_face: Mapped[int] = mapped_column(Integer, nullable=False)
     max_face: Mapped[int] = mapped_column(Integer, nullable=False)
     face_increment: Mapped[int] = mapped_column(Integer, nullable=False, default=1000)

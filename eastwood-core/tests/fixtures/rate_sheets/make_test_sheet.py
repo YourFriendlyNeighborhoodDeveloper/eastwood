@@ -66,7 +66,9 @@ def write(out: Path) -> None:
         w = csv.writer(f)
         w.writerow(["age", "sex", "tobacco", "tier", "face", "mode", "expected"])
         for age, sex, tob, tier, face in ((65, "F", False, "level", 10000), (72, "M", True, "level", 15000),
-                                          (58, "F", False, "graded", 20000), (80, "M", False, "level", 5000)):
+                                          (58, "F", False, "graded", 20000), (80, "M", False, "level", 5000),
+                                          (68, "F", True, "level", 12000), (61, "M", True, "graded", 8000),
+                                          (77, "M", False, "graded", 10000), (70, "F", True, "graded", 15000)):
             w.writerow([age, sex, "Y" if tob else "N", tier, face, "monthly", monthly(age, sex, tob, tier, face)])
 
 
