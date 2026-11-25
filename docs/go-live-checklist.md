@@ -63,7 +63,7 @@ Same isolation, simulated provider, scripted SMS prospects answering through
 the signed `/twilio/sms` webhook, and the synthetic rate sheet verified through
 `scripts/rates.py`. Details: [`sms-first-engine.md`](sms-first-engine.md#acceptance-results-2026-11-25).
 
-- **Tests:** eastwood-core **487 passed** (incl. OCR) + **24 database integration
+- **Tests:** eastwood-core **488 passed** (incl. OCR) + **24 database integration
   passed**; ai-agent **270 passed**, TypeScript clean.
 - **Pipeline:** upload → preview → import → scrub → qualify → campaign → SMS →
   replies → qualification → verified quote → booking → confirmation →

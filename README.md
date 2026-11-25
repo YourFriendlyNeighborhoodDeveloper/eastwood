@@ -6,7 +6,7 @@
 
 Eastwood takes purchased or inbound leads, decides who may lawfully be contacted and who is worth contacting, and has **Imogen**, an AI assistant, work them. Text comes first: a two-way SMS conversation that qualifies the prospect, quotes only from verified carrier rate sheets, and books them with a licensed human agent who closes. A realtime voice mode runs the same discovery by phone when a campaign opts in. Every step is gated in code, not by prompting a model to behave.
 
-> **Status: pre-launch.** The application is built and test-verified (757 unit and end-to-end tests, plus 24 database integration tests). It was verified end to end against an isolated stack with simulated providers: a 27,000-lead voice load test, and an SMS-first commercial acceptance test from upload to booked appointment (1,444 leads; every stated premium matched the rate book; no double booking). The remaining go-live work is credentials, registrations, verified carrier rates, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md), [`docs/sms-first-engine.md`](docs/sms-first-engine.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
+> **Status: pre-launch.** The application is built and test-verified (758 unit and end-to-end tests, plus 24 database integration tests). It was verified end to end against an isolated stack with simulated providers: a 27,000-lead voice load test, and an SMS-first commercial acceptance test from upload to booked appointment (1,444 leads; every stated premium matched the rate book; no double booking). The remaining go-live work is credentials, registrations, verified carrier rates, data, and legal sign-off; see [`docs/go-live-checklist.md`](docs/go-live-checklist.md), [`docs/sms-first-engine.md`](docs/sms-first-engine.md) and [`docs/launch-dependencies-and-costs.md`](docs/launch-dependencies-and-costs.md).
 
 ---
 
@@ -164,7 +164,7 @@ Blocks utterances that promise approval ("guaranteed", "can't be denied"), imply
 | AI | OpenAI Realtime `gpt-realtime-2` (voice "shimmer"), `gpt-4o-transcribe` with logprobs, tuned server VAD |
 | Data | PostgreSQL 16 (two databases, 11 SQL migrations), Apache Kafka 3.7 (KRaft), Redis 7 |
 | Infrastructure | Docker Compose (9 services), nginx 1.25, Prometheus, Grafana |
-| Testing | pytest (487 unit tests incl. OCR, + 24 database integration tests), `node:test` via tsx (270 tests, including end-to-end call simulations), a 27,000-lead voice load test and an SMS-first acceptance test with simulated providers |
+| Testing | pytest (488 unit tests incl. OCR, + 24 database integration tests), `node:test` via tsx (270 tests, including end-to-end call simulations), a 27,000-lead voice load test and an SMS-first acceptance test with simulated providers |
 | Legacy pipeline (`src/`) | kafka-python, psycopg 3, Redis idempotency keys, booking tokens, consent evidence packs |
 
 ## Repository layout
